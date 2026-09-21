@@ -1,0 +1,21 @@
+{
+  "title": "Maester Azure Automation Monitoring",
+  "summary": "Run scheduled Microsoft 365 security checks in Azure Automation and keep compressed reports in Azure Storage.",
+  "tags": [
+    "Maester",
+    "Microsoft 365",
+    "Azure Automation",
+    "Security Monitoring"
+  ],
+  "highlights": [
+    "Runs weekly checks with a PowerShell 7.4 runbook",
+    "Stores compressed history with a latest-report pointer",
+    "Supports optional web portal and extended permission checks",
+    "Uses a managed identity for Microsoft Graph access"
+  ],
+  "solutionCount": 1,
+  "quickstartCommands": [
+    "azd init -t nathanmcnulty/azd-maester-azureautomation",
+    "azd up"
+  ]
+}
