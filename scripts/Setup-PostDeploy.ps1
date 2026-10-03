@@ -133,24 +133,15 @@ if (-not $PSBoundParameters.ContainsKey('SecurityGroupObjectId') -and -not $PSBo
 
 $resolvedResourceGroupName = if ($ResourceGroupName) { $ResourceGroupName } elseif ($env:AZURE_RESOURCE_GROUP) { $env:AZURE_RESOURCE_GROUP } else { "rg-$EnvironmentName" }
 
-# ──────────────────────────────────────────────
-# Discover storage account
-# ──────────────────────────────────────────────
-
-$storageQuery = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Storage/storageAccounts?api-version=2023-05-01"
-$storagePayload = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$storageQuery" -Headers $armHeaders
-if (-not $storagePayload.value -or $storagePayload.value.Count -eq 0) {
-  throw "No Storage Account resources were found in resource group '$resolvedResourceGroupName'."
+. (Join-Path $PSScriptRoot 'Resolve-DeploymentTargets.ps1')
+. (Join-Path $PSScriptRoot 'JobScheduleOwnership.ps1')
+$deploymentValues = Get-MaesterDeploymentValues -EnvironmentName $EnvironmentName -SubscriptionId $SubscriptionId -ResourceGroupName $resolvedResourceGroupName
+$targets = Resolve-MaesterDeploymentTargets -EnvironmentValues $deploymentValues -SubscriptionId $SubscriptionId -ResourceGroupName $resolvedResourceGroupName -EnvironmentName $EnvironmentName -SolutionName 'automation-account' -GetResource {
+  param($path)
+  Invoke-RestMethod -Method GET -Uri "https://management.azure.com$path" -Headers $armHeaders
 }
-
-$preferredStorageAccountName = "stmaester$($EnvironmentName.ToLower())"
-$storageAccount = @($storagePayload.value | Where-Object { $_.name -eq $preferredStorageAccountName }) | Select-Object -First 1
-if (-not $storageAccount) {
-  $storageAccount = @($storagePayload.value | Where-Object { $_.name -like 'stmaester*' }) | Select-Object -First 1
-}
-if (-not $storageAccount) {
-  $storageAccount = $storagePayload.value[0]
-}
+$storageAccount = $targets.StorageAccount
+$webApp = $targets.WebApp
 
 # ──────────────────────────────────────────────
 # Storage Blob Data Reader for signed-in user
@@ -202,12 +193,18 @@ else {
 
 $automationQuery = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts?api-version=2023-11-01"
 $automationPayload = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$automationQuery" -Headers $armHeaders
+if ($null -eq $automationPayload.value -or $automationPayload.value -isnot [System.Collections.IList] -or
+    ($automationPayload.PSObject.Properties['nextLink'] -and $automationPayload.nextLink)) {
+  throw 'Automation account inventory was incomplete.'
+}
 if (-not $automationPayload.value -or $automationPayload.value.Count -eq 0) {
   throw "No Automation Account resources were found in resource group '$resolvedResourceGroupName'."
 }
 
 $preferredAutomationAccountName = "aa-$($EnvironmentName.ToLower())"
-$automationAccount = @($automationPayload.value | Where-Object { $_.name -eq $preferredAutomationAccountName }) | Select-Object -First 1
+$matchingAutomationAccounts = @($automationPayload.value | Where-Object { $_.name -ieq $preferredAutomationAccountName })
+if ($matchingAutomationAccounts.Count -gt 1) { throw 'Automation account inventory has duplicate target names.' }
+$automationAccount = if ($matchingAutomationAccounts.Count -eq 1) { $matchingAutomationAccounts[0] } else { $null }
 if (-not $automationAccount) {
   $foundNames = @($automationPayload.value | ForEach-Object { $_.name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   $foundList = if ($foundNames.Count -gt 0) { $foundNames -join ', ' } else { 'none' }
@@ -215,6 +212,14 @@ if (-not $automationAccount) {
 }
 
 $automationAccountName = $automationAccount.name
+$expectedAutomationAccountId = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName"
+if ($automationAccount.id -ine $expectedAutomationAccountId -or
+    $automationAccount.type -ine 'Microsoft.Automation/automationAccounts' -or
+    -not $automationAccount.tags -or $automationAccount.tags.workload -ine 'maester' -or
+    $automationAccount.tags.solution -ine 'automation-account' -or
+    $automationAccount.tags.environment -ine $EnvironmentName -or $automationAccount.tags.managedBy -ine 'azd') {
+  throw 'The Automation account does not match the exact template deployment target.'
+}
 
 $principalId = & (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Get-ManagedIdentityPrincipal.ps1') `
   -SubscriptionId $SubscriptionId `
@@ -224,7 +229,7 @@ $principalId = & (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Get-ManagedId
   -ResourceName $automationAccountName `
   -ApiVersion '2023-11-01'
 
-Set-AzdEnvValue -Name 'AUTOMATION_MI_PRINCIPAL_ID' -Value $principalId
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_MI_PRINCIPAL_ID' -Value $principalId
 
 # ──────────────────────────────────────────────
 # Grant Graph API permissions
@@ -426,16 +431,16 @@ if ($IncludeAzure -and $azureSetupStatus -eq 'pending') {
   $azureSetupStatus = if ($succeededScopes -gt 0) { 'configured' } else { 'skipped' }
 }
 
-Set-AzdEnvValue -Name 'SETUP_EXCHANGE_STATUS' -Value $exchangeSetupStatus
-Set-AzdEnvValue -Name 'SETUP_TEAMS_STATUS' -Value $teamsSetupStatus
-Set-AzdEnvValue -Name 'SETUP_AZURE_STATUS' -Value $azureSetupStatus
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_EXCHANGE_STATUS' -Value $exchangeSetupStatus
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_TEAMS_STATUS' -Value $teamsSetupStatus
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_AZURE_STATUS' -Value $azureSetupStatus
 
-Set-AzdEnvJsonArray -Name 'EXO_APPROLE_ASSIGNMENT_IDS' -Values @($exoAppRoleAssignmentIds)
-Set-AzdEnvJsonArray -Name 'TEAMS_READER_ROLE_ASSIGNMENT_IDS' -Values @($teamsRoleAssignmentIds)
-Set-AzdEnvJsonArray -Name 'AZURE_ROLE_ASSIGNMENT_IDS' -Values @($azureRoleAssignmentIds)
+Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'EXO_APPROLE_ASSIGNMENT_IDS' -Values @($exoAppRoleAssignmentIds)
+Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'TEAMS_READER_ROLE_ASSIGNMENT_IDS' -Values @($teamsRoleAssignmentIds)
+Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'AZURE_ROLE_ASSIGNMENT_IDS' -Values @($azureRoleAssignmentIds)
 
 if ($exoServicePrincipalDisplayName) {
-  Set-AzdEnvValue -Name 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME' -Value $exoServicePrincipalDisplayName
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME' -Value $exoServicePrincipalDisplayName
 }
 
 # ──────────────────────────────────────────────
@@ -463,10 +468,7 @@ Write-Host "Published runbook '$runbookName' with local script content."
 # Easy Auth on optional Web App
 # ──────────────────────────────────────────────
 
-$webAppsQuery = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Web/sites?api-version=2023-12-01"
-$webAppsPayload = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$webAppsQuery" -Headers $armHeaders
-
-if ($webAppsPayload.value -and $webAppsPayload.value.Count -gt 0) {
+if ($webApp) {
   if (-not $SecurityGroupObjectId -and -not [string]::IsNullOrWhiteSpace($SecurityGroupDisplayName)) {
     Connect-MgGraphSilent -TenantId $TenantId -Scopes 'Group.Read.All','Directory.Read.All'
 
@@ -541,12 +543,6 @@ if ($webAppsPayload.value -and $webAppsPayload.value.Count -gt 0) {
 
   Connect-MgGraphSilent -TenantId $TenantId -Scopes 'Application.ReadWrite.All','Directory.Read.All','DelegatedPermissionGrant.ReadWrite.All'
 
-  $preferredWebAppName = "app-maester-$($EnvironmentName.ToLower())"
-  $webApp = @($webAppsPayload.value | Where-Object { $_.name -eq $preferredWebAppName }) | Select-Object -First 1
-  if (-not $webApp) {
-    $webApp = $webAppsPayload.value[0]
-  }
-
   $webAppName = $webApp.name
   $webAppHostName = $webApp.properties.defaultHostName
   $redirectUri = "https://$webAppHostName/.auth/login/aad/callback"
@@ -595,20 +591,9 @@ if ($webAppsPayload.value -and $webAppsPayload.value.Count -gt 0) {
   }
 
   Write-Host "Persisting Easy Auth Entra app identifiers to azd environment variables..."
-  & azd env set EASY_AUTH_ENTRA_APP_OBJECT_ID $aadApp.id
-  if ($LASTEXITCODE -ne 0) {
-    Write-Warning 'Failed to persist EASY_AUTH_ENTRA_APP_OBJECT_ID to azd environment.'
-  }
-
-  & azd env set EASY_AUTH_ENTRA_APP_CLIENT_ID $aadApp.appId
-  if ($LASTEXITCODE -ne 0) {
-    Write-Warning 'Failed to persist EASY_AUTH_ENTRA_APP_CLIENT_ID to azd environment.'
-  }
-
-  & azd env set EASY_AUTH_ENTRA_APP_DISPLAY_NAME $aadApp.displayName
-  if ($LASTEXITCODE -ne 0) {
-    Write-Warning 'Failed to persist EASY_AUTH_ENTRA_APP_DISPLAY_NAME to azd environment.'
-  }
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_OBJECT_ID' -Value $aadApp.id
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_CLIENT_ID' -Value $aadApp.appId
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_DISPLAY_NAME' -Value $aadApp.displayName
 
   $servicePrincipalResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$($aadApp.appId)'"
   $easyAuthServicePrincipal = $null
@@ -725,16 +710,36 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 if (-not $publishedLocalRunbook) { throw 'Local Maester runbook publication was not confirmed; weekly schedule was not attached.' }
 
-$jobScheduleId = $env:AUTOMATION_JOB_SCHEDULE_ID
-if ([string]::IsNullOrWhiteSpace($jobScheduleId)) {
-  $jobScheduleId = Get-AzdEnvironmentValue -Values (Get-AzdEnvironmentValues) -Name 'AUTOMATION_JOB_SCHEDULE_ID'
-}
+$jobScheduleId = [string]$deploymentValues['AUTOMATION_JOB_SCHEDULE_ID']
 $parsedJobScheduleId = [guid]::Empty
 if ([string]::IsNullOrWhiteSpace($jobScheduleId) -or -not [guid]::TryParse($jobScheduleId, [ref]$parsedJobScheduleId)) {
   throw 'AUTOMATION_JOB_SCHEDULE_ID must be a GUID before attaching the weekly schedule.'
 }
 $jobScheduleUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/jobSchedules/$jobScheduleId`?api-version=2023-11-01"
+$liveAccount = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$expectedAutomationAccountId`?api-version=2023-11-01" -Headers $armHeaders
+$liveSchedules = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$expectedAutomationAccountId/jobSchedules?api-version=2023-11-01" -Headers $armHeaders
+if ($null -eq $liveSchedules.value -or $liveSchedules.value -isnot [System.Collections.IList] -or
+    ($liveSchedules.PSObject.Properties['nextLink'] -and $liveSchedules.nextLink)) {
+  throw 'Automation jobSchedule inventory was incomplete before association.'
+}
+Assert-MaesterJobScheduleWriteTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
+  -JobScheduleId $jobScheduleId -Account $liveAccount -JobSchedules @($liveSchedules.value) `
+  -ReceiptAccountId ([string]$deploymentValues['AUTOMATION_OWNED_ACCOUNT_ID']) `
+  -ReceiptPrincipalId ([string]$deploymentValues['AUTOMATION_OWNED_PRINCIPAL_ID']) `
+  -ReceiptJobScheduleId ([string]$deploymentValues['AUTOMATION_OWNED_JOB_SCHEDULE_ID']) `
+  -AdoptAccountId ([string]$deploymentValues['AUTOMATION_ADOPT_ACCOUNT_ID']) `
+  -AdoptPrincipalId ([string]$deploymentValues['AUTOMATION_ADOPT_PRINCIPAL_ID']) `
+  -AdoptJobScheduleId ([string]$deploymentValues['AUTOMATION_ADOPT_JOB_SCHEDULE_ID'])
 $jobScheduleBody = @{ properties = @{ schedule = @{ name = 'maester-weekly-sunday' }; runbook = @{ name = $runbookName } } } | ConvertTo-Json -Depth 5
 Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders -Body $jobScheduleBody -ContentType 'application/json' | Out-Null
+if ($liveAccount.id -ine $expectedAutomationAccountId -or $liveAccount.identity.principalId -ine $principalId) {
+  throw 'The Automation account identity changed before ownership could be recorded.'
+}
+$verifiedSchedule = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders
+Assert-MaesterOwnershipReceiptTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
+  -ExpectedJobScheduleId $jobScheduleId -Account $liveAccount -JobSchedule $verifiedSchedule
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_ACCOUNT_ID' -Value $expectedAutomationAccountId
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_PRINCIPAL_ID' -Value $principalId
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_JOB_SCHEDULE_ID' -Value $jobScheduleId
 Write-Host "Attached verified local runbook '$runbookName' to the weekly schedule."
 

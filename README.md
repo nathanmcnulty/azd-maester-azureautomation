@@ -93,6 +93,24 @@ What this does:
 - **Quick**: Automation + Storage
 - **WebApp**: Quick + Web App (Entra auth restricted by security group)
 
+For a manual postprovision retry after a successful provision, run
+`./scripts/Setup-PostDeploy.ps1 -EnvironmentName <selected-environment> -SubscriptionId <selected-subscription> -ResourceGroupName <deployed-resource-group>`.
+Setup reads that environment's exact `STORAGE_ACCOUNT_NAME` and optional
+`WEB_APP_NAME` and `WEB_APP_ENABLED` deployment outputs; a false enablement output skips Easy Auth even
+when other Web Apps exist in the resource group. Missing or mismatched targets
+stop setup before role assignments or Easy Auth changes.
+
+Preprovision preserves existing Automation jobSchedules and resource locks. It
+reuses the template's schedule ID only when the selected azd environment has a
+complete `AUTOMATION_OWNED_ACCOUNT_ID`, `AUTOMATION_OWNED_PRINCIPAL_ID`, and
+`AUTOMATION_OWNED_JOB_SCHEDULE_ID` receipt matching the live account and
+association. For an existing account without that receipt, first inspect the
+live account ID, managed identity principal ID, and template jobSchedule ID,
+then set the corresponding `AUTOMATION_ADOPT_*` values in that same azd
+environment. A partial receipt or ambiguous association stops redeployment
+until the exact target is reconciled. Postprovision records ownership only
+after verifying the published local runbook and exact live association.
+
 Defaults:
 
 - `PERMISSION_PROFILE=Extended`

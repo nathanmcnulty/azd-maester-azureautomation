@@ -503,4 +503,7 @@ output jobScheduleId string = jobScheduleId
 output automationPrincipalId string = automationAccount.identity.principalId
 output storageAccountName string = storageAccount.name
 output webAppName string = includeWebApp ? maesterWebApp!.outputs.webAppName : ''
+output STORAGE_ACCOUNT_NAME string = storageAccount.name
+output WEB_APP_NAME string = includeWebApp ? maesterWebApp!.outputs.webAppName : ''
+output WEB_APP_ENABLED string = includeWebApp ? 'true' : 'false'
 output webAppDefaultHostName string = includeWebApp ? maesterWebApp!.outputs.webAppDefaultHostName : ''
