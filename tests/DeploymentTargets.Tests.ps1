@@ -135,3 +135,57 @@ Describe 'Named azd environment access' {
     finally { $env:AZURE_ENV_NAME = $original }
   }
 }
+
+Describe 'Main Automation account preflight' {
+  BeforeAll {
+    $script:mainName = 'aa-maester-test'
+    $script:mainPrincipal = '33333333-3333-4333-8333-333333333333'
+    $script:mainId = "$scope/providers/Microsoft.Automation/automationAccounts/$mainName"
+    $script:mainTags = [pscustomobject]@{ workload = 'maester'; solution = $solutionName; environment = $environmentName; managedBy = 'azd' }
+    function Resolve-TestMain {
+      param($Values, $Resource)
+      Resolve-MaesterMainDeploymentTarget -EnvironmentValues $Values -NameOutput 'automationAccountName' `
+        -PrincipalOutput 'automationPrincipalId' -ProviderType 'Microsoft.Automation/automationAccounts' `
+        -ApiVersion '2023-11-01' -SubscriptionId $subscriptionId -ResourceGroupName $resourceGroupName `
+        -EnvironmentName $environmentName -SolutionName $solutionName -GetResource {
+          param($path)
+          $script:requestedMainPath = $path
+          $Resource
+        }
+    }
+    function New-TestMain {
+      [pscustomobject]@{ id = $script:mainId; name = $script:mainName; type = 'Microsoft.Automation/automationAccounts';
+        tags = $script:mainTags; identity = @{ type = 'SystemAssigned'; principalId = $script:mainPrincipal } }
+    }
+  }
+
+  It 'binds exact named output, scope, tags, and system identity' {
+    $values = @{ automationAccountName = $script:mainName; automationPrincipalId = $script:mainPrincipal }
+    $result = Resolve-TestMain -Values $values -Resource (New-TestMain)
+    $result.id | Should -Be $script:mainId
+    $script:requestedMainPath | Should -Be "$script:mainId`?api-version=2023-11-01"
+  }
+
+  It 'fails before mutation for missing, wrong-scope, wrong-principal, or wrong-tag main targets' {
+    $values = @{ automationAccountName = $script:mainName; automationPrincipalId = $script:mainPrincipal }
+    { Resolve-TestMain -Values $values -Resource $null } | Should -Throw '*deployed Microsoft.Automation/automationAccounts*'
+    $wrong = New-TestMain; $wrong.id = $wrong.id.Replace('/subscriptions/', '/subscriptions/other-')
+    { Resolve-TestMain -Values $values -Resource $wrong } | Should -Throw '*deployed Microsoft.Automation/automationAccounts*'
+    $wrong = New-TestMain; $wrong.identity.principalId = '44444444-4444-4444-8444-444444444444'
+    { Resolve-TestMain -Values $values -Resource $wrong } | Should -Throw '*deployed Microsoft.Automation/automationAccounts*'
+    $wrong = New-TestMain; $wrong.tags = @{ workload = 'other'; solution = $solutionName; environment = $environmentName; managedBy = 'azd' }
+    { Resolve-TestMain -Values $values -Resource $wrong } | Should -Throw '*deployed Microsoft.Automation/automationAccounts*'
+  }
+
+  It 'invokes main target preflight before any setup receipt or ARM PUT' {
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../scripts/Setup-PostDeploy.ps1'), [ref]$tokens, [ref]$errors)
+    $errors.Count | Should -Be 0
+    $commands = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
+    $preflight = @($commands | Where-Object { $_.GetCommandName() -eq 'Resolve-MaesterMainDeploymentTarget' })[0]
+    $writes = @($commands | Where-Object { $_.GetCommandName() -eq 'Set-MaesterAzdEnvValue' -or $_.Extent.Text -match 'Invoke-RestMethod\s+-Method\s+PUT' })
+    $preflight | Should -Not -BeNullOrEmpty
+    $writes.Count | Should -BeGreaterThan 0
+    $preflight.Extent.StartOffset | Should -BeLessThan (($writes | Measure-Object -Property { $_.Extent.StartOffset } -Minimum).Minimum)
+  }
+}

@@ -91,3 +91,42 @@ function Resolve-MaesterDeploymentTargets {
 
   return [pscustomobject]@{ StorageAccount = $storage; WebApp = $webApp }
 }
+
+function Resolve-MaesterMainDeploymentTarget {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][System.Collections.IDictionary]$EnvironmentValues,
+    [Parameter(Mandatory)][string]$NameOutput,
+    [Parameter(Mandatory)][string]$PrincipalOutput,
+    [Parameter(Mandatory)][string]$ProviderType,
+    [Parameter(Mandatory)][string]$ApiVersion,
+    [Parameter(Mandatory)][string]$SubscriptionId,
+    [Parameter(Mandatory)][string]$ResourceGroupName,
+    [Parameter(Mandatory)][string]$EnvironmentName,
+    [Parameter(Mandatory)][string]$SolutionName,
+    [ValidateSet('Any', 'FunctionApp')][string]$Kind = 'Any',
+    [Parameter(Mandatory)][scriptblock]$GetResource
+  )
+
+  $name = [string]$EnvironmentValues[$NameOutput]
+  $principal = [string]$EnvironmentValues[$PrincipalOutput]
+  $parsedPrincipal = [guid]::Empty
+  if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,78}[A-Za-z0-9]$' -or
+      -not [guid]::TryParse($principal, [ref]$parsedPrincipal)) {
+    throw "Deployment outputs $NameOutput and $PrincipalOutput must identify the main runtime resource."
+  }
+  $id = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/$ProviderType/$name"
+  $resource = & $GetResource "${id}?api-version=$ApiVersion"
+  if (-not $resource -or $resource.id -ine $id -or $resource.name -ine $name -or
+      $resource.type -ine $ProviderType -or -not $resource.tags -or
+      $resource.tags.workload -ine 'maester' -or $resource.tags.solution -ine $SolutionName -or
+      $resource.tags.environment -ine $EnvironmentName -or $resource.tags.managedBy -ine 'azd' -or
+      [string]$resource.identity.principalId -ine $principal -or
+      [string]$resource.identity.type -notmatch '(^|,\s*)SystemAssigned($|\s*,)') {
+    throw "The deployed $ProviderType resource '$name' does not match its exact output, scope, tags, and managed identity."
+  }
+  if ($Kind -eq 'FunctionApp' -and [string]$resource.kind -notmatch '(^|,)functionapp(,|$)') {
+    throw "The deployed resource '$name' is not a Function App."
+  }
+  return $resource
+}

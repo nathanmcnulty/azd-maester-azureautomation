@@ -95,10 +95,12 @@ What this does:
 
 For a manual postprovision retry after a successful provision, run
 `./scripts/Setup-PostDeploy.ps1 -EnvironmentName <selected-environment> -SubscriptionId <selected-subscription> -ResourceGroupName <deployed-resource-group>`.
-Setup reads that environment's exact `STORAGE_ACCOUNT_NAME` and optional
-`WEB_APP_NAME` and `WEB_APP_ENABLED` deployment outputs; a false enablement output skips Easy Auth even
-when other Web Apps exist in the resource group. Missing or mismatched targets
-stop setup before role assignments or Easy Auth changes.
+Setup reads that environment's exact `STORAGE_ACCOUNT_NAME`,
+`automationAccountName`, `automationPrincipalId`, and optional `WEB_APP_NAME`
+and `WEB_APP_ENABLED` deployment outputs. A false enablement output skips Easy
+Auth even when other Web Apps exist in the resource group. Missing or mismatched
+targets stop setup before role assignments or Easy Auth changes; the deployment
+summary uses the same exact targets.
 
 Preprovision preserves existing Automation jobSchedules and resource locks. It
 reuses the template's schedule ID only when the selected azd environment has a

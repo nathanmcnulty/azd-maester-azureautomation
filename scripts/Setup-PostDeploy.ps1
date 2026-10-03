@@ -142,6 +142,17 @@ $targets = Resolve-MaesterDeploymentTargets -EnvironmentValues $deploymentValues
 }
 $storageAccount = $targets.StorageAccount
 $webApp = $targets.WebApp
+$automationAccount = Resolve-MaesterMainDeploymentTarget -EnvironmentValues $deploymentValues `
+  -NameOutput 'automationAccountName' -PrincipalOutput 'automationPrincipalId' `
+  -ProviderType 'Microsoft.Automation/automationAccounts' -ApiVersion '2023-11-01' `
+  -SubscriptionId $SubscriptionId -ResourceGroupName $resolvedResourceGroupName `
+  -EnvironmentName $EnvironmentName -SolutionName 'automation-account' -GetResource {
+    param($path)
+    Invoke-RestMethod -Method GET -Uri "https://management.azure.com$path" -Headers $armHeaders
+  }
+$automationAccountName = [string]$automationAccount.name
+$expectedAutomationAccountId = [string]$automationAccount.id
+$principalId = [string]$automationAccount.identity.principalId
 
 # ──────────────────────────────────────────────
 # Storage Blob Data Reader for signed-in user
@@ -188,46 +199,8 @@ else {
 }
 
 # ──────────────────────────────────────────────
-# Discover Automation Account and get managed identity principal
+# Persist verified Automation managed identity principal
 # ──────────────────────────────────────────────
-
-$automationQuery = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts?api-version=2023-11-01"
-$automationPayload = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$automationQuery" -Headers $armHeaders
-if ($null -eq $automationPayload.value -or $automationPayload.value -isnot [System.Collections.IList] -or
-    ($automationPayload.PSObject.Properties['nextLink'] -and $automationPayload.nextLink)) {
-  throw 'Automation account inventory was incomplete.'
-}
-if (-not $automationPayload.value -or $automationPayload.value.Count -eq 0) {
-  throw "No Automation Account resources were found in resource group '$resolvedResourceGroupName'."
-}
-
-$preferredAutomationAccountName = "aa-$($EnvironmentName.ToLower())"
-$matchingAutomationAccounts = @($automationPayload.value | Where-Object { $_.name -ieq $preferredAutomationAccountName })
-if ($matchingAutomationAccounts.Count -gt 1) { throw 'Automation account inventory has duplicate target names.' }
-$automationAccount = if ($matchingAutomationAccounts.Count -eq 1) { $matchingAutomationAccounts[0] } else { $null }
-if (-not $automationAccount) {
-  $foundNames = @($automationPayload.value | ForEach-Object { $_.name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  $foundList = if ($foundNames.Count -gt 0) { $foundNames -join ', ' } else { 'none' }
-  throw "Expected Automation Account '$preferredAutomationAccountName' was not found in resource group '$resolvedResourceGroupName'. Found: $foundList. This usually indicates provisioning failed (often quota-related), and setup cannot continue."
-}
-
-$automationAccountName = $automationAccount.name
-$expectedAutomationAccountId = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName"
-if ($automationAccount.id -ine $expectedAutomationAccountId -or
-    $automationAccount.type -ine 'Microsoft.Automation/automationAccounts' -or
-    -not $automationAccount.tags -or $automationAccount.tags.workload -ine 'maester' -or
-    $automationAccount.tags.solution -ine 'automation-account' -or
-    $automationAccount.tags.environment -ine $EnvironmentName -or $automationAccount.tags.managedBy -ine 'azd') {
-  throw 'The Automation account does not match the exact template deployment target.'
-}
-
-$principalId = & (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Get-ManagedIdentityPrincipal.ps1') `
-  -SubscriptionId $SubscriptionId `
-  -ResourceGroupName $resolvedResourceGroupName `
-  -ProviderNamespace 'Microsoft.Automation' `
-  -ResourceType 'automationAccounts' `
-  -ResourceName $automationAccountName `
-  -ApiVersion '2023-11-01'
 
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_MI_PRINCIPAL_ID' -Value $principalId
 
