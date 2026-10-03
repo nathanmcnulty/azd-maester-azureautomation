@@ -26,6 +26,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-SetupHelpers.psm1') -Force
+. (Join-Path $PSScriptRoot 'Resolve-DeploymentTargets.ps1')
 
 function Get-EnvValue {
   param(
@@ -113,13 +114,7 @@ $exoAppRoleAssignmentIdsFromEnv = 'n/a'
 $teamsRoleAssignmentIdsFromEnv = 'n/a'
 $azureRoleAssignmentIdsFromEnv = 'n/a'
 $exoServicePrincipalDisplayNameFromEnv = 'n/a'
-$envValues = @{}
-try {
-  $envValues = (& azd env get-values --output json 2>$null | ConvertFrom-Json -AsHashtable)
-}
-catch {
-  $envValues = @{}
-}
+$envValues = Get-MaesterDeploymentValues -EnvironmentName $EnvironmentName -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
 
 if ($envValues.Count -gt 0) {
   $easyAuthAppObjectIdValue = Get-EnvValue -Lines $envValues -Name 'EASY_AUTH_ENTRA_APP_OBJECT_ID'
@@ -229,11 +224,25 @@ $resourcesPayload = Invoke-RestMethod -Method GET -Uri "https://management.azure
 $resources = @($resourcesPayload.value)
 $customDnsDocsUrl = 'https://learn.microsoft.com/azure/app-service/app-service-web-tutorial-custom-domain'
 
-$automationResource = $resources | Where-Object { $_.type -eq 'Microsoft.Automation/automationAccounts' } | Select-Object -First 1
-$storageResource = $resources | Where-Object { $_.type -eq 'Microsoft.Storage/storageAccounts' } | Select-Object -First 1
-$webAppResource = $resources | Where-Object { $_.type -eq 'Microsoft.Web/sites' } | Select-Object -First 1
-$planResource = $resources | Where-Object { $_.type -eq 'Microsoft.Web/serverfarms' } | Select-Object -First 1
-$includeWebAppEffective = [bool]$webAppResource
+$getExactResource = {
+  param($path)
+  Invoke-RestMethod -Method GET -Uri "https://management.azure.com$path" -Headers $armHeaders
+}
+$summaryTargets = Resolve-MaesterDeploymentTargets -EnvironmentValues $envValues -SubscriptionId $SubscriptionId `
+  -ResourceGroupName $ResourceGroupName -EnvironmentName $EnvironmentName -SolutionName 'automation-account' `
+  -GetResource $getExactResource
+$automationResource = Resolve-MaesterMainDeploymentTarget -EnvironmentValues $envValues `
+  -NameOutput 'automationAccountName' -PrincipalOutput 'automationPrincipalId' `
+  -ProviderType 'Microsoft.Automation/automationAccounts' -ApiVersion '2023-11-01' `
+  -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName -EnvironmentName $EnvironmentName `
+  -SolutionName 'automation-account' -GetResource $getExactResource
+$storageResource = $summaryTargets.StorageAccount
+$webAppResource = $summaryTargets.WebApp
+$planResource = if ($webAppResource -and $webAppResource.properties.serverFarmId) {
+  @($resources | Where-Object { $_.type -ieq 'Microsoft.Web/serverfarms' -and
+      $_.id -ieq $webAppResource.properties.serverFarmId }) | Select-Object -First 1
+} else { $null }
+$includeWebAppEffective = [string]$envValues['WEB_APP_ENABLED'] -eq 'true'
 $deploymentModeEffective = if ($includeWebAppEffective) { 'webapp' } else { 'quick' }
 
 $summaryDir = Join-Path -Path (Resolve-Path (Join-Path $PSScriptRoot '..')).Path -ChildPath 'outputs'
