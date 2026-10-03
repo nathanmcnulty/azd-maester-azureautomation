@@ -42,6 +42,7 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $projectRoot
 
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-SetupHelpers.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-Helpers.psm1') -Force
 
 
 # ──────────────────────────────────────────────
@@ -704,4 +705,36 @@ if ($webAppsPayload.value -and $webAppsPayload.value.Count -gt 0) {
   Write-Host "Easy Auth admin consent scopes: $consentScope"
   Write-Host "Easy Auth security group: $SecurityGroupObjectId (source: $securityGroupSource)"
 }
+
+# The infrastructure creates the weekly schedule without an association. Attach it
+# only after the locally maintained runbook has replaced the pinned seed content.
+$expectedRunbookContent = $runbookContent.TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+$publishedLocalRunbook = $false
+$runbookResourceUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName`?api-version=$armApiVersion"
+$contentUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName/content?api-version=$armApiVersion"
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
+  $runbookResource = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$runbookResourceUri" -Headers $armHeaders
+  if ($runbookResource.properties.state -eq 'Published') {
+    $publishedContent = [string](Invoke-RestMethod -Method GET -Uri "https://management.azure.com$contentUri" -Headers $armHeaders)
+    if ($publishedContent.TrimStart([char]0xFEFF).Replace("`r`n", "`n") -ceq $expectedRunbookContent) {
+      $publishedLocalRunbook = $true
+      break
+    }
+  }
+  Start-Sleep -Seconds 2
+}
+if (-not $publishedLocalRunbook) { throw 'Local Maester runbook publication was not confirmed; weekly schedule was not attached.' }
+
+$jobScheduleId = $env:AUTOMATION_JOB_SCHEDULE_ID
+if ([string]::IsNullOrWhiteSpace($jobScheduleId)) {
+  $jobScheduleId = Get-AzdEnvironmentValue -Values (Get-AzdEnvironmentValues) -Name 'AUTOMATION_JOB_SCHEDULE_ID'
+}
+$parsedJobScheduleId = [guid]::Empty
+if ([string]::IsNullOrWhiteSpace($jobScheduleId) -or -not [guid]::TryParse($jobScheduleId, [ref]$parsedJobScheduleId)) {
+  throw 'AUTOMATION_JOB_SCHEDULE_ID must be a GUID before attaching the weekly schedule.'
+}
+$jobScheduleUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/jobSchedules/$jobScheduleId`?api-version=2023-11-01"
+$jobScheduleBody = @{ properties = @{ schedule = @{ name = 'maester-weekly-sunday' }; runbook = @{ name = $runbookName } } } | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders -Body $jobScheduleBody -ContentType 'application/json' | Out-Null
+Write-Host "Attached verified local runbook '$runbookName' to the weekly schedule."
 
