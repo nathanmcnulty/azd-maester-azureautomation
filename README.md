@@ -12,6 +12,7 @@ Deploys a production-style Maester automation solution on Azure with:
 After `azd init -t nathanmcnulty/azd-maester-azureautomation`, run from the template root:
 
 `azd up`
+
 ## Versioning and shared components
 
 This template uses the stable Maester module `2.2.0`. Shared azd hooks,
@@ -22,16 +23,7 @@ The original multi-variant catalog remains available at
 [`nathanmcnulty/azd-maester`](https://github.com/nathanmcnulty/azd-maester) while
 the migration is being completed.
 
-During interactive `azd up`
-## Versioning and shared components
-
-This template uses the stable Maester module `2.2.0`. Shared azd hooks,
-permission setup, and the optional report web app are vendored from
-`nathanmcnulty/azd-reference` and recorded in `azd-components.lock.json`.
-
-The original multi-variant catalog remains available at
-[`nathanmcnulty/azd-maester`](https://github.com/nathanmcnulty/azd-maester) while
-the migration is being completed., the preprovision wizard prompts for:
+During interactive `azd up`, the preprovision wizard prompts for:
 
 - Include Web App / Exchange / Teams / Azure
 - Security group object ID (required when Web App is enabled)
@@ -42,16 +34,7 @@ For non-interactive runs (`azd up --no-prompt`), if `AZURE_RESOURCE_GROUP` is se
 
 ## Advanced options (optional)
 
-You can optionally enable additional data collection/connectivity for Maester by enabling one or more include options in the `azd up`
-## Versioning and shared components
-
-This template uses the stable Maester module `2.2.0`. Shared azd hooks,
-permission setup, and the optional report web app are vendored from
-`nathanmcnulty/azd-reference` and recorded in `azd-components.lock.json`.
-
-The original multi-variant catalog remains available at
-[`nathanmcnulty/azd-maester`](https://github.com/nathanmcnulty/azd-maester) while
-the migration is being completed. wizard.
+You can optionally enable additional data collection/connectivity for Maester by enabling one or more include options in the `azd up` wizard.
 
 - `IncludeExchange`
   - Installs `ExchangeOnlineManagement` into the Automation runtime.
@@ -71,16 +54,7 @@ the migration is being completed. wizard.
 - If a step fails due to missing privileges, the scripts will:
   - Prompt you to **Stop** or **Skip** in interactive runs.
   - Default to **Skip + continue** in non-interactive runs (CI).
-- Toggling an option from `Yes` to `No` in a later `azd up`
-## Versioning and shared components
-
-This template uses the stable Maester module `2.2.0`. Shared azd hooks,
-permission setup, and the optional report web app are vendored from
-`nathanmcnulty/azd-reference` and recorded in `azd-components.lock.json`.
-
-The original multi-variant catalog remains available at
-[`nathanmcnulty/azd-maester`](https://github.com/nathanmcnulty/azd-maester) while
-the migration is being completed. run is additive only and does **not** revoke prior assignments.
+- Toggling an option from `Yes` to `No` in a later `azd up` run is additive only and does **not** revoke prior assignments.
 - Revocation/best-effort cleanup runs on `azd down` (predown hook).
 
 What this does:
@@ -121,8 +95,8 @@ Defaults:
 
 ## Operations
 
-- Full deployment verification (optional):
-  `./scripts/Test-AzdDeployment.ps1 -EnvironmentName <env> -SubscriptionId <subId> -TenantId <tenantId> -IncludeWebApp $true -SecurityGroupObjectId <groupObjectId>`
+- Runbook job validation after provision (starts an Automation job; review the Maester report for test outcomes):
+  `./scripts/Invoke-RunbookValidation.ps1 -SubscriptionId <subId> -ResourceGroupName <resourceGroup> -AutomationAccountName <automationAccount> -TenantId <tenantId>`
 - Remove environment + Azure resources (includes predown cleanup):
   `azd down -e <env> --force --purge`
 - Optionally remove local azd env:
