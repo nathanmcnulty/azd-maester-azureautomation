@@ -1,0 +1,194 @@
+{
+  "schemaVersion": "1.0.0",
+  "repository": "nathanmcnulty/azd-maester-azureautomation",
+  "sourceRevision": "4ef4820ff355ab4ae4eddd3bfb27297ae56a8acc",
+  "capturedAt": "2026-10-04",
+  "items": [
+    {
+      "id": "MAUTO-001",
+      "title": "Reconcile this backlog with current source and active work",
+      "kind": "discovery",
+      "priority": "P1",
+      "status": "done",
+      "wave": 0,
+      "problem": "Plans and implementation evidence are spread across files; the captured source can change while other tasks work.",
+      "scope": [
+        "docs/backlog.json",
+        "docs/backlog.md",
+        "Existing roadmap, execution status, open issues and pull requests (read-only)"
+      ],
+      "acceptance": [
+        "Classify each candidate as implemented, still open, superseded or awaiting evidence; retain source links and reasons.",
+        "Inspect dirty state, remotes, worktrees and local environment presence without reading secrets; avoid duplicate work with active owners.",
+        "Resolve the actual offline validation commands and record exact current default-branch/working-tree provenance; do not copy historical live passes to newer code."
+      ],
+      "validation": [
+        "git status --short",
+        "git remote -v",
+        "git worktree list --porcelain",
+        "Read the applicable instructions and validation workflow; read gh issue list and gh pr list for the named repository using nathanmcnulty. Do not create or modify issues/PRs."
+      ],
+      "dependencies": [],
+      "authorization": "local-only",
+      "components": [],
+      "sources": [
+        "README.md"
+      ],
+      "evidence": [
+        "Reconciled later reviewed metadata tip ec243a79c1a9370c08efc476f056dd1dafcc523e against freshly fetched origin/main 4ef4820ff355ab4ae4eddd3bfb27297ae56a8acc. Current main adds reviewed source fixes from pull request(s) #15, #17 and #19; no dirty canonical bytes or unrelated branch history were copied.",
+        "Current repository issues and pull requests were read on 2026-10-04: none are open. Items MAUTO-002, MAUTO-003 remain proposed because their component, host-specific live, or shared azd-maester issue gates are not satisfied by source merges alone; completed issue-backed fixes retain exact issue and pull-request evidence.",
+        "Full current-source offline Pester validation passed 48/48 tests with zero failures. Canonical backlog schema and generated-Markdown checks also passed; no Azure, Graph, deployment, report publication or other live operation was performed."
+      ],
+      "blocker": null,
+      "claim": null
+    },
+    {
+      "id": "MAUTO-002",
+      "title": "Qualify Automation runbook execution and optional report-webapp lifecycle",
+      "kind": "verification",
+      "priority": "P1",
+      "status": "proposed",
+      "wave": 2,
+      "problem": "Shared pilots are already vendored; host-specific execution and report access still need independently bound evidence.",
+      "scope": [
+        "scripts/Invoke-RunbookValidation.ps1",
+        "docs/",
+        "infra/",
+        "tests/TargetContext.Tests.ps1"
+      ],
+      "acceptance": [
+        "Record exact Maester/runtime/component revisions and host execution output under the selected tenant.",
+        "Validate optional webapp identity, report publishing, Easy Auth and feature-specific permission delta.",
+        "Disabled web hosting works independently; cleanup preserves adopted objects and records exact owned resources."
+      ],
+      "validation": [
+        "Invoke-Pester ./tests/TargetContext.Tests.ps1 -CI",
+        "After separate authorization use ./scripts/Invoke-RunbookValidation.ps1 against the exact owned host; retain report access and cleanup evidence."
+      ],
+      "dependencies": [],
+      "authorization": "azure-deployment",
+      "components": [
+        "maester-azd-hooks",
+        "maester-report-webapp"
+      ],
+      "sources": [
+        "README.md",
+        "scripts/Invoke-RunbookValidation.ps1"
+      ],
+      "evidence": [],
+      "blocker": null
+    },
+    {
+      "id": "MAUTO-003",
+      "title": "Reconcile shared hook/webapp versions and host permission deltas",
+      "kind": "maintenance",
+      "priority": "P2",
+      "status": "proposed",
+      "wave": 1,
+      "problem": "Existing adoption must be updated through hashes and host-specific validation rather than blindly reinstalling components.",
+      "scope": [
+        "azd-components.lock.json",
+        "azd-permissions.json",
+        "scripts/",
+        "infra/",
+        "docs/"
+      ],
+      "acceptance": [
+        "Compare lock pins with canonical manifests and current-source drift before proposing an update.",
+        "Run target-context negative cases and compare minimal versus optional-feature permissions.",
+        "Keep Maester execution and reporting host-specific; record exact source hashes and candidate/pilot status."
+      ],
+      "validation": [
+        "Invoke-Pester ./tests/TargetContext.Tests.ps1 -CI",
+        "Read and compare lock hashes with canonical reference source; do not overwrite drift."
+      ],
+      "dependencies": [],
+      "authorization": "local-only",
+      "components": [
+        "maester-azd-hooks",
+        "maester-report-webapp"
+      ],
+      "sources": [
+        "README.md",
+        "azd-components.lock.json"
+      ],
+      "evidence": [],
+      "blocker": null
+    },
+    {
+      "id": "MAUTO-004",
+      "title": "Failed Maester execution can publish a completed report and pass runbook validation",
+      "kind": "maintenance",
+      "priority": "P1",
+      "status": "done",
+      "wave": 1,
+      "problem": "The report captured on 2026-10-03 is closed after the reviewed fix merged; this record preserves the original trigger and validation boundary.",
+      "scope": [
+        "Paths and trigger cited in the linked issue",
+        "Focused offline regression tests",
+        "docs/",
+        "docs/backlog.json",
+        "docs/backlog.md",
+        "BACKLOG.md"
+      ],
+      "acceptance": [
+        "Classify the report as still reproducible, already fixed, superseded or requiring live evidence; record the exact current revision.",
+        "For a reproducible defect, demonstrate the linked trigger with an offline regression and apply the smallest fix preserving tenant/target/ownership and failure semantics.",
+        "For a feature, produce a bounded design with compatibility, optional permissions, acceptance and rollout gates before implementation; no live mutation or automatic issue closure."
+      ],
+      "validation": [
+        "Read the issue body and current source/PRs; capture the exact reproduction and existing registered offline validation command.",
+        "Use deterministic fixtures for the described trigger and negative boundary; retain current-source results. Do not rerun production or tenant operations to reproduce it."
+      ],
+      "dependencies": [],
+      "authorization": "local-only",
+      "components": [],
+      "sources": [
+        "https://github.com/nathanmcnulty/azd-maester-azureautomation/issues/9",
+        "README.md"
+      ],
+      "evidence": [
+        "Merged fix: https://github.com/nathanmcnulty/azd-maester-azureautomation/pull/11 closed issue #9 at f799869fa5f8465b76b8dfffe851b81a3c9e234f; the fix is present on current main c50ed1f9f5ce34d2567b2708e86fd54998328661.",
+        "Current-head source propagates Invoke-Maester errors, rejects missing genuine reports and fails required latest publication: https://github.com/nathanmcnulty/azd-maester-azureautomation/blob/c50ed1f9f5ce34d2567b2708e86fd54998328661/scripts/Invoke-MaesterAutomationRunbook.ps1#L426-L494",
+        "Deterministic regression coverage includes thrown invocation, missing report, genuine findings and failed publication: https://github.com/nathanmcnulty/azd-maester-azureautomation/blob/c50ed1f9f5ce34d2567b2708e86fd54998328661/tests/RunnerFailure.Tests.ps1#L43-L88 and https://github.com/nathanmcnulty/azd-maester-azureautomation/blob/c50ed1f9f5ce34d2567b2708e86fd54998328661/tests/WebAppFailure.Tests.ps1#L43-L56",
+        "Exact current-main validation passed: https://github.com/nathanmcnulty/azd-maester-azureautomation/actions/runs/37145474192/job/111268384908",
+        "Live evidence gap preserved: PR #11 leaves Azure Automation platform status propagation as an integration follow-up; this reconciliation claims no live Automation run.",
+        "GitHub issue #9 is closed by merged pull request #11; current origin/main 4ef4820ff355ab4ae4eddd3bfb27297ae56a8acc contains the reviewed fix. Source closure does not claim a new live deployment, report publication, or human-visible result."
+      ],
+      "blocker": null,
+      "claim": null
+    },
+    {
+      "id": "MAUTO-005",
+      "title": "Pin the complete Automation runtime package set for reproducible deployment",
+      "kind": "discovery",
+      "priority": "P1",
+      "status": "done",
+      "wave": 0,
+      "problem": "The report captured on 2026-10-03 is closed after the reviewed fix merged; this record preserves the original trigger and validation boundary.",
+      "scope": [
+        "Linked issue and current source (read-only)",
+        "Repository-local backlog evidence"
+      ],
+      "acceptance": [
+        "Read the linked issue and current default branch; classify the exact defect, current owner and evidence gap.",
+        "Record a current PR or verified resolution before selecting any implementation; preserve broader feature and live acceptance gates."
+      ],
+      "validation": [
+        "Read current issue and PR state using nathanmcnulty; do not modify or close issues during reconciliation.",
+        "Inspect dirty state and worktrees; resolve the exact current revision and relevant offline commands before implementation."
+      ],
+      "dependencies": [],
+      "authorization": "local-only",
+      "components": [],
+      "sources": [
+        "https://github.com/nathanmcnulty/azd-maester-azureautomation/issues/10"
+      ],
+      "evidence": [
+        "GitHub issue #10 is closed by merged pull request #12; current origin/main 4ef4820ff355ab4ae4eddd3bfb27297ae56a8acc contains the reviewed fix. Source closure does not claim a new live deployment, report publication, or human-visible result."
+      ],
+      "blocker": null,
+      "claim": null
+    }
+  ]
+}
