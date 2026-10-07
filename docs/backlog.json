@@ -1,8 +1,8 @@
 {
   "schemaVersion": "1.0.0",
   "repository": "nathanmcnulty/azd-maester-azureautomation",
-  "sourceRevision": "4ef4820ff355ab4ae4eddd3bfb27297ae56a8acc",
-  "capturedAt": "2026-10-04",
+  "sourceRevision": "f307d58aa2616c3eea2f23bf366e3bc25bbb081d",
+  "capturedAt": "2026-10-07",
   "items": [
     {
       "id": "MAUTO-001",
@@ -83,7 +83,7 @@
       "title": "Reconcile shared hook/webapp versions and host permission deltas",
       "kind": "maintenance",
       "priority": "P2",
-      "status": "proposed",
+      "status": "done",
       "wave": 1,
       "problem": "Existing adoption must be updated through hashes and host-specific validation rather than blindly reinstalling components.",
       "scope": [
@@ -112,8 +112,16 @@
         "README.md",
         "azd-components.lock.json"
       ],
-      "evidence": [],
-      "blocker": null
+      "evidence": [
+        "Adopted pilot maester-azd-hooks 0.1.6 from immutable azd-reference revision a09cac311aac7362f56d2a31833ed90ce5812649. All eight managed targets match the component manifest and lock; only Maester-UpWizard.psm1 changed from 0.1.5, to require a non-empty GUID before persisting the optional Web App group Object ID.",
+        "Preserved maester-report-webapp 0.1.1 at immutable revision 79f0608c672639aae0f0ed96d160b1eb17cfc08f with exact vendored hash 4b12708c76489f3f20e031fdafc706a3062276ef4a83fda7f5109f4cbd902972.",
+        "Added a schema-valid partial permission manifest with exactly 24 source-proven declarations: eight Minimal runtime roles, eleven additional default Extended roles, four deployment-operator scopes, and optional Mail.Send. Working and raw-index comparisons returned 8/19/20/4 permissions with no evidence findings; comparisonComplete remains false and explicit gaps preserve unmodeled Azure RBAC, optional feature, operator and cleanup authority.",
+        "The 0.1.6 permission helper is byte-identical to 0.1.5 at SHA-256 e43b6e4ce60c9adef30355cc126519e5f754c01630c94fca9d85c04aebde3548; this adoption adds no declared scope or grant and claims no effective tenant permission.",
+        "Offline validation passed: TargetContext 5/5, full host suite 48/48, PowerShell parse 24 files with zero errors, Bicep compilation to valid JSON SHA-256 3f29d9adc005c8ee144f93336a2312dd6fc0577087a5f924bcd64cc31f5cd690, canonical permission comparison tests 9/9, component/lock drift checks, backlog schema, generated Markdown and diff checks.",
+        "No Azure, Graph, deployment, report publication or live host operation was performed. Host-specific live execution, report access and cleanup remain under item 002 and are unchanged."
+      ],
+      "blocker": null,
+      "claim": null
     },
     {
       "id": "MAUTO-004",
