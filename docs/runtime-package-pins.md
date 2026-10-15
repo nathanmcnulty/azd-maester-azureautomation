@@ -41,28 +41,10 @@ local runbook, confirms its published content, and only then creates the weekly
 job-schedule association. If setup or publication fails, no recurring run is
 attached.
 
-## PowerShell 7.6 / .NET 10 source upgrade
+## Hosted runtime baseline
 
-The maintained template selects `PowerShell-76-Maester` with runtime version
-`7.6`. All nine package versions and hashes above remain unchanged. The
-`PowerShell-74-Maester` observations on 2026-10-03 are historical package-import
-evidence; they do not validate execution on 7.6. Microsoft documents
+The template selects `PowerShell-76-Maester` with PowerShell 7.6 on .NET 10 LTS
+and the nine exact package versions and hashes above. Package-import
+observations do not establish runbook execution on this runtime. Microsoft documents
 [PowerShell 7.6 Automation support](https://learn.microsoft.com/en-us/azure/automation/automation-runbook-types#powershell-runbooks);
 [PowerShell 7.6 uses .NET 10 LTS](https://learn.microsoft.com/en-us/powershell/scripting/install/powershell-support-lifecycle).
-
-An approved redeployment creates the new runtime environment and binds the
-owned runbook and package resources to it. Incremental ARM deployment retains
-the old runtime; this source change does not delete it or pause an existing
-schedule. Before a live upgrade, inspect the exact selected account and
-runbook, pause and verify its owned schedule, approve redeployment, confirm the
-new runtime/package imports and runbook binding, and execute a separately
-authorized synthetic runbook job before resuming processing. Validate the
-optional Exchange/Teams connections only when approved. No live startup,
-identity, report delivery or schedule evidence is claimed by offline tests.
-
-The steps above are operator approval gates, not an implemented paused-migration
-workflow. Existing postprovision writes the owned job-schedule association;
-this source PR does not prove that an earlier pause is preserved through
-redeployment or provide a pause/resume mechanism. Require a separately
-reviewed paused-migration procedure with authoritative schedule readback
-after each deployment step and a separate decision to resume processing.

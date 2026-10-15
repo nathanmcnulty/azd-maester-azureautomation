@@ -19,6 +19,5 @@ Describe 'Automation PowerShell 7.6 / .NET 10 baseline' {
         $readme | Should -Match 'PowerShell 7\.6 runtime'
         $catalog | Should -Match 'PowerShell 7\.6 runbook'
         $packages | Should -Match 'Versions were observed in the succeeded `PowerShell-74-Maester`'
-        $packages | Should -Match 'does not delete it or pause an existing'
     }
 }
