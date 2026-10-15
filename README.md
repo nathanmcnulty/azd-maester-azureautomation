@@ -2,7 +2,7 @@
 
 Deploys a production-style Maester automation solution on Azure with:
 
-- Azure Automation (PowerShell 7.4 runtime)
+- Azure Automation (PowerShell 7.6 runtime)
 - Managed identity + Graph permissions
 - Storage-backed report history (`archive`) and latest pointer (`latest/latest.html`)
 - Optional App Service + Easy Auth portal in WebApp mode

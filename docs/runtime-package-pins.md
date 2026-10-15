@@ -1,7 +1,7 @@
 # Automation runtime package lock
 
 `infra/main.bicep` imports exact PSGallery package versions into the PowerShell
-7.4 Automation runtime. Each `contentLink` records the SHA-256 of the downloaded
+7.6 Automation runtime. Each `contentLink` records the SHA-256 of the downloaded
 `.nupkg`. The lab accepted a deliberately incorrect `contentHash` during an
 Automation package import, so that ARM field is **not an enforced integrity
 boundary**. The published local runbook independently downloads each exact
@@ -40,3 +40,22 @@ This seed is not attached to the weekly schedule. Postprovision publishes the
 local runbook, confirms its published content, and only then creates the weekly
 job-schedule association. If setup or publication fails, no recurring run is
 attached.
+
+## PowerShell 7.6 / .NET 10 source upgrade
+
+The maintained template selects `PowerShell-76-Maester` with runtime version
+`7.6`. All nine package versions and hashes above remain unchanged. The
+`PowerShell-74-Maester` observations on 2026-10-03 are historical package-import
+evidence; they do not validate execution on 7.6. Microsoft documents
+[PowerShell 7.6 Automation support](https://learn.microsoft.com/en-us/azure/automation/automation-runbook-types#powershell-runbooks);
+[PowerShell 7.6 uses .NET 10 LTS](https://learn.microsoft.com/en-us/powershell/scripting/install/powershell-support-lifecycle).
+
+An approved redeployment creates the new runtime environment and binds the
+owned runbook and package resources to it. Incremental ARM deployment retains
+the old runtime; this source change does not delete it or pause an existing
+schedule. Before a live upgrade, inspect the exact selected account and
+runbook, pause and verify its owned schedule, approve redeployment, confirm the
+new runtime/package imports and runbook binding, and execute a separately
+authorized synthetic runbook job before resuming processing. Validate the
+optional Exchange/Teams connections only when approved. No live startup,
+identity, report delivery or schedule evidence is claimed by offline tests.
