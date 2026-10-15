@@ -59,3 +59,10 @@ new runtime/package imports and runbook binding, and execute a separately
 authorized synthetic runbook job before resuming processing. Validate the
 optional Exchange/Teams connections only when approved. No live startup,
 identity, report delivery or schedule evidence is claimed by offline tests.
+
+The steps above are operator approval gates, not an implemented paused-migration
+workflow. Existing postprovision writes the owned job-schedule association;
+this source PR does not prove that an earlier pause is preserved through
+redeployment or provide a pause/resume mechanism. Require a separately
+reviewed paused-migration procedure with authoritative schedule readback
+after each deployment step and a separate decision to resume processing.
