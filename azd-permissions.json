@@ -448,6 +448,7 @@
     "Optional Exchange setup is not inventoried: Exchange.ManageAsApp, Exchange RBAC View-Only Configuration, RoleManagement.ReadWrite.Directory used by the shared advanced-setup connection, and its cleanup authority.",
     "Optional Teams setup is not inventoried: Teams Reader Entra directory role, RoleManagement.ReadWrite.Directory used by the shared advanced-setup connection, and its cleanup authority.",
     "Optional Azure setup is not inventoried: workload Reader at operator-selected subscription/resource-group/management-group scopes and the operator authority used to create those assignments.",
-    "Optional report web app setup is not inventoried: Website Contributor for the workload, Group.Read.All/Directory.Read.All when resolving a group name, Application.ReadWrite.All/Directory.Read.All/DelegatedPermissionGrant.ReadWrite.All for Easy Auth, and the tenant-wide openid/profile/email/User.Read delegated grant."
+    "Optional report web app setup is not inventoried: Website Contributor for the workload, Group.Read.All/Directory.Read.All when resolving a group name, Application.ReadWrite.All/Directory.Read.All/DelegatedPermissionGrant.ReadWrite.All for Easy Auth, and the tenant-wide openid/profile/email/User.Read delegated grant.",
+    "Default-disabled drift isolation adds no permission or collector. Approved drift inputs, normalization/privacy and any future source collection/publication authority need separate review; existing permission evidence and runtime validation gates are unchanged."
   ]
 }

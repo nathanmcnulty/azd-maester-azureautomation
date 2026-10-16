@@ -152,3 +152,7 @@ This solution is reasonably secure, but there are additional controls you may ch
 - azd hooks/extensibility: https://learn.microsoft.com/azure/developer/azure-developer-cli/azd-extensibility
 - Manage azd environment variables: https://learn.microsoft.com/azure/developer/azure-developer-cli/manage-environment-variables
 - App Service custom domain: https://learn.microsoft.com/azure/app-service/app-service-web-tutorial-custom-domain
+
+Configuration drift remains disabled: the runner isolates inherited drift input
+from the ordinary assessment. See [drift isolation and remaining gates](docs/drift-isolation.md)
+(MAUTO-009 and MAUTO-010).
