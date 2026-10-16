@@ -7,7 +7,7 @@
 - **Repository:** nathanmcnulty/azd-maester-azureautomation
 - **Source revision:** `f307d58aa2616c3eea2f23bf366e3bc25bbb081d`
 - **Captured:** 2026-10-07
-- **Items:** 5
+- **Items:** 7
 
 ## MAUTO-001: Reconcile this backlog with current source and active work
 
@@ -286,3 +286,111 @@ Shared pilots are already vendored; host-specific execution and report access st
 **Review and authorization note:**
 
 Review MAUTO-002 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-006: Implement optional Caddy Container App report viewer
+
+- **Kind:** feature
+- **Priority:** P2
+- **Status:** proposed
+- **Wave:** 4
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The shared viewer design is complete, but this standalone Automation runner has no Caddy provider implementation.
+
+**Scope:**
+
+- infra/
+- scripts/
+- docs/
+- azd-permissions.json
+
+**Acceptance:**
+
+- Add exact -IncludeContainerWebApp mapping, default-off and exclusive with both other viewer flags, including legacy -IncludeWebApp; preserve existing hooks and deployment-validation behavior.
+- Use only an immutable signed image/SBOM and reviewed versioned azd-reference component pin; publish a private bounded HTML projection plus manifest with ETag/conditional pointer, BlobDataContributor only where required, and viewer managed identity read-only.
+- Bound Caddy paths, fixed loopback GET/HEAD routes with no shared report volume, size/poll/LKG/atomic switch, HTTPS and native tenant/audience group authorization; reject missing/overage groups, foreign tenant, forged headers and host bypass. Record owned rollback/deletion receipts and validate with offline fixtures before authorized lab writes.
+- Use a dedicated viewer-projection container with immutable HTML/manifest versions and an ordered ETag-conditional latest pointer. Assume all app containers can use attached identities; expose no archive, Graph or resource-write privilege to the viewer.
+- Before feature completion, pass the design native gates in the authorized lab with concrete tenant/subscription/group/test users&colon; allowed and denied report/asset/host access, exact report bytes, concurrency/staleness, provider-specific rotation/cold start, rollback and ownership-aware cleanup. Preserve failed evidence; no live success claim from fixtures.
+
+**Validation:**
+
+- Run the existing standalone validation workflow and new offline native fixtures; fixtures do not prove live auth, provider acceptance or report receipt.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/main/docs/report-viewer-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/5
+
+**Evidence:**
+
+- _none_
+
+**Review and authorization note:**
+
+Review MAUTO-006 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-007: Implement optional Static Web Apps Standard report viewer
+
+- **Kind:** feature
+- **Priority:** P2
+- **Status:** proposed
+- **Wave:** 4
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The shared viewer design is complete, but this standalone Automation runner has no Static Web Apps provider implementation.
+
+**Scope:**
+
+- infra/
+- scripts/
+- docs/
+- azd-permissions.json
+
+**Acceptance:**
+
+- Add exact -IncludeStaticWebApp mapping, default-off and exclusive with both other viewer flags, including legacy -IncludeWebApp; preserve existing hooks and deployment-validation behavior.
+- Use Standard/custom tenant issuer and a reviewed Report.Reader role-source function/claim mapping with fail-closed missing, invalid and overage claim behavior; do not add tenant-wide Graph reads.
+- Keep end-user UAMI/FIC distinct from the high-trust deployment-token publisher; bind fixed safe HTML, auth config, hash, revocation/reset and owned teardown receipts. Validate offline before authorized lab writes.
+- Qualify the documented preview/support posture of function-based role assignment. Keep site-deployment authority and token access out of Maester runners&colon; a separate trusted publisher must bind fixed auth/function config hashes and reject report-supplied config or code.
+- Before feature completion, pass the design native gates in the authorized lab with concrete tenant/subscription/group/test users&colon; allowed and denied report/asset/host access, exact report bytes, concurrency/staleness, provider-specific rotation/cold start, rollback and ownership-aware cleanup. Preserve failed evidence; no live success claim from fixtures.
+
+**Validation:**
+
+- Run the existing standalone validation workflow and new offline native fixtures; no deployment or delivery claim is made.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/main/docs/report-viewer-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/4
+
+**Evidence:**
+
+- _none_
+
+**Review and authorization note:**
+
+Review MAUTO-007 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.

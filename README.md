@@ -47,6 +47,10 @@ You can optionally enable additional data collection/connectivity for Maester by
   - Grants Azure RBAC `Reader` to the Automation Account managed identity at one or more scopes.
   - Scopes can be management groups and/or subscriptions.
 
+### Existing deployment upgrades
+
+See [upgrade preservation](docs/upgrade-preservation.md) for freshly verified schedule/runbook targets and preservation, the explicit runtime-only access-preservation mode, validation-job controls, and the required live acceptance/rollback gate.
+
 ### Permission behavior
 
 - Azure RBAC, Entra directory roles, Exchange assignments, and Microsoft Graph app-role assignments are separate authorities.

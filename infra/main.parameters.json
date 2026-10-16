@@ -28,6 +28,12 @@
     },
     "jobScheduleId": {
       "value": "${AUTOMATION_JOB_SCHEDULE_ID}"
+    },
+    "existingAutomationResourcesOption": {
+      "value": "${AUTOMATION_EXISTING_RESOURCES}"
+    },
+    "preserveUpgradeAccessOption": {
+      "value": "${AUTOMATION_UPGRADE_PRESERVE_ACCESS}"
     }
   }
 }
