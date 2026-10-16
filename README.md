@@ -7,6 +7,9 @@ Deploys a production-style Maester automation solution on Azure with:
 - Storage-backed report history (`archive`) and latest pointer (`latest/latest.html`)
 - Optional App Service + Easy Auth portal in WebApp mode
 
+Local setup and maintained scripts require **PowerShell 7.6 or newer**. See
+[development validation](docs/development.md) for the matching Pester baseline.
+
 ## Quickstart (recommended)
 
 After `azd init -t nathanmcnulty/azd-maester-azureautomation`, run from the template root:

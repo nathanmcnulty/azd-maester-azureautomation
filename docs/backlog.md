@@ -7,7 +7,7 @@
 - **Repository:** nathanmcnulty/azd-maester-azureautomation
 - **Source revision:** `f307d58aa2616c3eea2f23bf366e3bc25bbb081d`
 - **Captured:** 2026-10-07
-- **Items:** 5
+- **Items:** 6
 
 ## MAUTO-001: Reconcile this backlog with current source and active work
 
@@ -172,6 +172,59 @@ The report captured on 2026-10-03 is closed after the reviewed fix merged; this 
 **Review and authorization note:**
 
 Review MAUTO-004 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-006: Enforce the PowerShell 7.6 and Pester 6.2 authoring baseline
+
+- **Kind:** maintenance
+- **Priority:** P1
+- **Status:** done
+- **Wave:** 1
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The runtime upgrade selects PowerShell 7.6, but maintained scripts lacked a minimum-version guard and repository CI still selected Pester 5.7.1.
+
+**Scope:**
+
+- Owned scripts/&ast;.ps1 entry points
+- Repository validation workflow and developer guidance
+
+**Acceptance:**
+
+- Require PowerShell 7.6+ before owned script bodies execute; preserve immutable vendored sources and historical receipts.
+- Install and import exact Pester 6.2.0 in CI and document equivalent local validation.
+- Run the full offline suite on the supported baseline; retain separate live runtime/preservation gates.
+
+**Validation:**
+
+- Invoke-Pester -Path ./tests -CI with PowerShell 7.6+ and imported Pester 6.2.0
+- Parse all PowerShell and inspect ScriptRequirements for every owned script; verify permission evidence hashes and canonical backlog checks.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/issues/24
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/pull/26
+- docs/development.md
+
+**Evidence:**
+
+- 2026-10-16&colon; Source follow-up based on runtime PR26 head 36804911c0ea8de8f301a6f4ec6ba995c8c55124. All nine owned scripts enforce PowerShell 7.6 before execution. Vendored scripts, runtime package locks and historical evidence are unchanged.
+- PowerShell 7.6.6 with actual Pester 6.2.0&colon; all 75 repository tests passed, zero failed or skipped. This is offline source evidence; it does not establish native runtime startup, runbook preservation or workload execution. Existing runtime/preservation PRs and live gates remain open.
+
+**Review and authorization note:**
+
+Review MAUTO-006 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
 
 ## MAUTO-003: Reconcile shared hook/webapp versions and host permission deltas
 

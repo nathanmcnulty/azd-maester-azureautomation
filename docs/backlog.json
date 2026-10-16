@@ -197,6 +197,41 @@
       ],
       "blocker": null,
       "claim": null
+    },
+    {
+      "id": "MAUTO-006",
+      "title": "Enforce the PowerShell 7.6 and Pester 6.2 authoring baseline",
+      "kind": "maintenance",
+      "priority": "P1",
+      "status": "done",
+      "wave": 1,
+      "problem": "The runtime upgrade selects PowerShell 7.6, but maintained scripts lacked a minimum-version guard and repository CI still selected Pester 5.7.1.",
+      "scope": [
+        "Owned scripts/*.ps1 entry points",
+        "Repository validation workflow and developer guidance"
+      ],
+      "acceptance": [
+        "Require PowerShell 7.6+ before owned script bodies execute; preserve immutable vendored sources and historical receipts.",
+        "Install and import exact Pester 6.2.0 in CI and document equivalent local validation.",
+        "Run the full offline suite on the supported baseline; retain separate live runtime/preservation gates."
+      ],
+      "validation": [
+        "Invoke-Pester -Path ./tests -CI with PowerShell 7.6+ and imported Pester 6.2.0",
+        "Parse all PowerShell and inspect ScriptRequirements for every owned script; verify permission evidence hashes and canonical backlog checks."
+      ],
+      "dependencies": [],
+      "authorization": "local-only",
+      "components": [],
+      "sources": [
+        "https://github.com/nathanmcnulty/azd-maester-azureautomation/issues/24",
+        "https://github.com/nathanmcnulty/azd-maester-azureautomation/pull/26",
+        "docs/development.md"
+      ],
+      "evidence": [
+        "2026-10-16: Source follow-up based on runtime PR26 head 36804911c0ea8de8f301a6f4ec6ba995c8c55124. All nine owned scripts enforce PowerShell 7.6 before execution. Vendored scripts, runtime package locks and historical evidence are unchanged.",
+        "PowerShell 7.6.6 with actual Pester 6.2.0: all 75 repository tests passed, zero failed or skipped. This is offline source evidence; it does not establish native runtime startup, runbook preservation or workload execution. Existing runtime/preservation PRs and live gates remain open."
+      ],
+      "blocker": null
     }
   ]
 }
