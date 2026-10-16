@@ -827,7 +827,12 @@ if ([bool]$finalAutomationState.Resources.Existing -ne $existingAutomationResour
   throw 'The Automation association changed during postdeployment; refusing to recreate or overwrite it.'
 }
 if ($existingAutomationResources) {
-  $finalRuntime = $finalAutomationState.Resources.Runbook.properties.runtimeEnvironment
+  # The legacy inventory API verifies ownership/state but omits runtimeEnvironment.
+  # Read the exact target again through the runtime-capable API; never infer it.
+  $finalRunbook = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$runbookResourceUri" -Headers $armHeaders
+  $finalRunbookRecord = $finalRunbook | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+  Get-MaesterRunbookPreservationMetadata -ExpectedAccountId $expectedAutomationAccountId -Runbook $finalRunbookRecord | Out-Null
+  $finalRuntime = $finalRunbookRecord['properties']['runtimeEnvironment']
   if ($finalRuntime -isnot [string] -or $finalRuntime -ine $deploymentValues['automationRuntimeEnvironmentName']) {
     throw 'The existing runbook runtime binding changed during final postdeployment readback.'
   }
