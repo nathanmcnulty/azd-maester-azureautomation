@@ -37,8 +37,9 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
       parameters = @{ IncludeAzure = 'false'; ExistingParameter = 'retained' }; runOn = 'existing-hybrid-worker'
     } }
     $schedule = [pscustomobject]@{ id = "$accountId/schedules/maester-weekly-sunday"; name = 'maester-weekly-sunday'; type = 'Microsoft.Automation/automationAccounts/schedules'; properties = @{ frequency = 'Week'; interval = 2; timeZone = 'Pacific/Auckland'; isEnabled = $false; startTime = '2026-10-20T01:23:00Z' } }
-    # JSON-derived service responses retain raw types, optional fields, quotes,
-    # newlines and literal azd-style interpolation syntax without replaying them.
+    # Authoritative 2024-10-23 runbook response. Legacy 2023-11-01 responses
+    # are detached and lose runtimeEnvironment in the version-aware REST mock.
+    # Preserve raw types, optional fields, quotes, newlines and literal azd syntax.
     $runbook = @'
 {
   "name": "maester-runbook",
@@ -79,7 +80,8 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
       Storage = [pscustomobject]@{ id = "$scope/providers/Microsoft.Storage/storageAccounts/stmaester6cykv256tyq6q"; name = 'stmaester6cykv256tyq6q'; type = 'Microsoft.Storage/storageAccounts'; tags = $tags }
       WebApp = [pscustomobject]@{ id = "$scope/providers/Microsoft.Web/sites/app-maester-6cykv256tyq6q"; name = 'app-maester-6cykv256tyq6q'; type = 'Microsoft.Web/sites'; kind = 'app'; tags = $tags; properties = @{ defaultHostName = 'app-maester-6cykv256tyq6q.azurewebsites.net'; serverFarmId = '' } }
       LocalContent = $localContent; PublishedContent = $localContent; Draft = ''; Calls = [Collections.Generic.List[string]]::new()
-      RuntimePatchBodies = [Collections.Generic.List[string]]::new(); RuntimePatchAttempts = 0; FailRuntimePatch = ''; AfterRuntimePatch = $null; RuntimeReads = 0; RunbookReads = 0; BeforeRunbookInventory = $null; BeforeRunbookRead = $null; BeforeContentRead = $null; ContentReads = 0
+      RuntimePatchBodies = [Collections.Generic.List[string]]::new(); RuntimePatchAttempts = 0; FailRuntimePatch = ''; AfterRuntimePatch = $null; RuntimeReads = 0; RunbookReads = 0; FinalRunbookReads = 0; BeforeRunbookRead = $null; BeforeFinalRunbookRead = $null; BeforeContentRead = $null; ContentReads = 0
+      RunbookInventoryResponses = [Collections.Generic.List[object]]::new()
       SetupCalls = 0; ValidationCalls = 0; GraphGrantCalls = 0; FailPublication = $false; DisappearOnFinalRead = $false; InventoryReads = 0; ReadbackJob = $null
     }
   }
@@ -220,8 +222,13 @@ Describe 'Existing upgrade postdeployment preservation' {
       }
       if ($path -like '*/schedules') { return $fixture.ScheduleList }
       if ($path -like '*/runbooks') {
-        if ($fixture.BeforeRunbookInventory) { & $fixture.BeforeRunbookInventory $fixture }
-        return $fixture.RunbookList
+        if ($Uri -ne "$path`?api-version=2023-11-01") { throw "Unexpected runbook inventory API version: $Uri" }
+        # The legacy list endpoint omits runtimeEnvironment. Never return the
+        # richer authoritative fixture or a shared object that a later read can alter.
+        $response = $fixture.RunbookList | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        foreach ($runbook in $response.value) { $runbook.properties.PSObject.Properties.Remove('runtimeEnvironment') }
+        $fixture.RunbookInventoryResponses.Add($response)
+        return $response
       }
       if ($path -eq "https://management.azure.com$($fixture.Job.id)") { if ($null -ne $fixture.ReadbackJob) { return $fixture.ReadbackJob }; return $fixture.Job }
       if ($path -eq "https://management.azure.com$($fixture.Runtime.id)") {
@@ -229,9 +236,19 @@ Describe 'Existing upgrade postdeployment preservation' {
         return ($fixture.Runtime | ConvertTo-Json -Depth 30 | ConvertFrom-Json)
       }
       if ($path -eq "https://management.azure.com$($fixture.Runbook.id)") {
+        if ($Uri -notin @("$path`?api-version=2023-11-01", "$path`?api-version=2024-10-23")) {
+          throw "Unexpected exact runbook API version: $Uri"
+        }
         $fixture.RunbookReads++
         if ($fixture.BeforeRunbookRead) { & $fixture.BeforeRunbookRead $fixture }
-        return ($fixture.Runbook | ConvertTo-Json -Depth 30 | ConvertFrom-Json)
+        $response = $fixture.Runbook | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        if ($Uri -eq "$path`?api-version=2023-11-01") {
+          $response.properties.PSObject.Properties.Remove('runtimeEnvironment')
+        } elseif ($fixture.InventoryReads -eq 3) {
+          $fixture.FinalRunbookReads++
+          if ($fixture.BeforeFinalRunbookRead) { & $fixture.BeforeFinalRunbookRead $response }
+        }
+        return $response
       }
       if ($path -like '*/runbooks/maester-runbook/content') {
         $fixture.ContentReads++
@@ -350,20 +367,77 @@ Describe 'Existing upgrade postdeployment preservation' {
     ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
   }
 
-  It 'rejects <Shape> runtime drift appearing only in the final inventory after strict helper verification' -ForEach @(
-    @{ Shape = 'another string' }, @{ Shape = 'a one-element array' }
+  It 'accepts legacy runbook inventories without runtime binding and verifies the final exact 2024 read' {
+    Set-UpgradeRuntimeVersion -Version '7.6' -Unbound
+    $fixture = $global:upgradeFixture
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $beforeJob = $fixture.Job | ConvertTo-Json -Depth 30 -Compress
+    $beforeSchedule = $fixture.Schedule | ConvertTo-Json -Depth 30 -Compress
+    $beforeRunbook = $fixture.Runbook | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+    $beforeRunbook.properties.runtimeEnvironment = 'PowerShell-76-Maester'
+
+    Invoke-UpgradeSetup
+
+    Assert-UpgradeRuntimePatchOnly
+    $fixture.RunbookInventoryResponses.Count | Should -Be 3
+    foreach ($response in $fixture.RunbookInventoryResponses) {
+      $response.value[0].properties.PSObject.Properties['runtimeEnvironment'] | Should -BeNullOrEmpty
+      [object]::ReferenceEquals($response.value[0], $fixture.Runbook) | Should -BeFalse
+    }
+    $fixture.FinalRunbookReads | Should -Be 1
+    $fixture.RunbookReads | Should -Be 4
+    $finalInventoryIndex = $fixture.Calls.FindLastIndex([Predicate[string]]{ param($call) $call -like 'GET */runbooks?api-version=2023-11-01' })
+    $finalReadIndex = $fixture.Calls.FindLastIndex([Predicate[string]]{ param($call) $call -like 'GET */runbooks/maester-runbook?api-version=2024-10-23' })
+    $finalReadIndex | Should -BeGreaterThan $finalInventoryIndex
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.Job | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeJob
+    ($fixture.Schedule | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeSchedule
+    ($fixture.Runbook | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly ($beforeRunbook | ConvertTo-Json -Depth 30 -Compress)
+    $fixture.PublishedContent | Should -BeExactly $fixture.LocalContent
+  }
+
+  It 'rejects <Shape> runtime binding only in the authoritative final exact read after strict helper verification' -ForEach @(
+    @{ Shape = 'missing' }, @{ Shape = 'null' }, @{ Shape = 'a one-element array' }, @{ Shape = 'another string' }
   ) {
     Set-UpgradeRuntimeVersion -Version '7.6' -Unbound
     $fixture = $global:upgradeFixture
-    $fixture.BeforeRunbookInventory = if ($Shape -eq 'another string') {
-      { param($f) if ($f.InventoryReads -eq 3) { $f.Runbook.properties.runtimeEnvironment = 'PowerShell-72-Existing' } }
-    } else {
-      { param($f) if ($f.InventoryReads -eq 3) { $f.Runbook.properties.runtimeEnvironment = @('PowerShell-76-Maester') } }
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $fixture.BeforeFinalRunbookRead = switch ($Shape) {
+      'missing' { { param($readback) $readback.properties.PSObject.Properties.Remove('runtimeEnvironment') } }
+      'null' { { param($readback) $readback.properties.runtimeEnvironment = $null } }
+      'a one-element array' { { param($readback) $readback.properties.runtimeEnvironment = @('PowerShell-76-Maester') } }
+      'another string' { { param($readback) $readback.properties.runtimeEnvironment = 'PowerShell-72-Existing' } }
     }
     { Invoke-UpgradeSetup } | Should -Throw '*runtime binding changed during final postdeployment readback*'
     Assert-UpgradeRuntimePatchOnly
     $fixture.RuntimePatchAttempts | Should -Be 1
-    $fixture.RunbookReads | Should -BeGreaterOrEqual 3
+    $fixture.FinalRunbookReads | Should -Be 1
+    $fixture.RunbookReads | Should -Be 4
+    # Earlier exact reads and the applied binding remain valid; neither those
+    # cached values nor an inventory omission can substitute for final evidence.
+    $fixture.Runbook.properties.runtimeEnvironment | Should -BeExactly 'PowerShell-76-Maester'
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+  }
+
+  It 'rejects changed <Field> only in the authoritative final exact runbook read' -ForEach @(
+    @{ Field = 'id' }, @{ Field = 'name' }, @{ Field = 'type' }, @{ Field = 'state' }, @{ Field = 'runbookType' }
+  ) {
+    Set-UpgradeRuntimeVersion -Version '7.6' -Unbound
+    $fixture = $global:upgradeFixture
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $fixture.BeforeFinalRunbookRead = switch ($Field) {
+      'id' { { param($readback) $readback.id = $readback.id.Replace('/aa-exact-output/', '/aa-other/') } }
+      'name' { { param($readback) $readback.name = 'another-runbook' } }
+      'type' { { param($readback) $readback.type = 'Microsoft.Automation/automationAccounts/schedules' } }
+      'state' { { param($readback) $readback.properties.state = 'Edit' } }
+      'runbookType' { { param($readback) $readback.properties.runbookType = 'Python3' } }
+    }
+    { Invoke-UpgradeSetup } | Should -Throw '*exact published PowerShell target*'
+    Assert-UpgradeRuntimePatchOnly
+    $fixture.RuntimePatchAttempts | Should -Be 1
+    $fixture.FinalRunbookReads | Should -Be 1
+    $fixture.Runbook.properties.state | Should -BeExactly 'Published'
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
   }
 
   It 'does not PATCH after the association changes before runtime binding' {
