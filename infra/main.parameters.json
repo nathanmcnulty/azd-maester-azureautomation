@@ -32,6 +32,9 @@
     "existingAutomationResourcesOption": {
       "value": "${AUTOMATION_EXISTING_RESOURCES}"
     },
+    "existingRunbookMetadataJson": {
+      "value": "${AUTOMATION_EXISTING_RUNBOOK_METADATA}"
+    },
     "preserveUpgradeAccessOption": {
       "value": "${AUTOMATION_UPGRADE_PRESERVE_ACCESS}"
     }

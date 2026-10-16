@@ -88,12 +88,29 @@ param jobScheduleId string = newGuid()
 @allowed(['true', 'false'])
 param existingAutomationResourcesOption string = 'false'
 
+@description('Fresh live-verified mutable metadata for the existing Maester runbook. Set only by preprovision after exact resource identity and ownership checks.')
+param existingRunbookMetadataJson string = '{}'
+
 @description('Bounded existing-deployment runtime-only upgrade. Leaves non-runtime infrastructure and all access settings untouched.')
 @allowed(['true', 'false'])
 param preserveUpgradeAccessOption string = 'false'
 
 var existingAutomationResources = existingAutomationResourcesOption == 'true'
 var preserveUpgradeAccess = preserveUpgradeAccessOption == 'true'
+var preserveExistingRunbook = existingAutomationResources || preserveUpgradeAccess
+// Required location/properties reads fail closed if an existing deployment lacks
+// the preprovision snapshot. Fresh deployments never parse a stale snapshot.
+var existingRunbookMetadata = preserveExistingRunbook ? json(existingRunbookMetadataJson) : {
+  location: location
+  properties: {}
+}
+// Replay only mutable metadata. Never merge arbitrary GET response properties.
+var preservedRunbookProperties = union(
+  contains(existingRunbookMetadata.properties, 'description') ? { description: existingRunbookMetadata.properties.description } : {},
+  contains(existingRunbookMetadata.properties, 'logProgress') ? { logProgress: existingRunbookMetadata.properties.logProgress } : {},
+  contains(existingRunbookMetadata.properties, 'logVerbose') ? { logVerbose: existingRunbookMetadata.properties.logVerbose } : {},
+  contains(existingRunbookMetadata.properties, 'logActivityTrace') ? { logActivityTrace: existingRunbookMetadata.properties.logActivityTrace } : {}
+)
 
 // Standardized parameters and tags for consistency with function-app and container-app-job
 var automationAccountName = 'aa-${toLower(environmentName)}'
@@ -402,11 +419,12 @@ resource runtimePackageMicrosoftTeams 'Microsoft.Automation/automationAccounts/r
 resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' = {
   name: runbookName
   parent: automationTarget
-  location: location
+  location: preserveExistingRunbook ? existingRunbookMetadata.location : location
+  tags: preserveExistingRunbook ? existingRunbookMetadata.?tags : null
   properties: union({
     runbookType: 'PowerShell'
     runtimeEnvironment: runtime74.name
-  }, (existingAutomationResources || preserveUpgradeAccess) ? {} : {
+  }, preserveExistingRunbook ? preservedRunbookProperties : {
     logProgress: true
     logVerbose: false
     description: 'Runbook to execute Maester report workflow'

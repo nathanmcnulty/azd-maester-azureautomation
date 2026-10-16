@@ -26,6 +26,7 @@ BeforeAll {
       $global:maesterOfflineScenario = $Scenario
       $global:maesterOfflineScenario.LocalContent = Get-Content (Join-Path (Split-Path $script:hookPath) 'Invoke-MaesterAutomationRunbook.ps1') -Raw
       $global:maesterOfflineCalls = [Collections.Generic.List[string]]::new()
+      $global:maesterOfflineWrites = @{}
       function Import-Module { param([string]$Name, [switch]$Force) }
       function Invoke-MaesterPreProvision { param($SolutionName, $SubscriptionId, $TenantId, $Location) }
       function azd {
@@ -34,7 +35,11 @@ BeforeAll {
         if ($args[0] -eq 'env' -and $args[1] -eq 'get-values') {
           return ($global:maesterOfflineScenario.Values | ConvertTo-Json -Compress)
         }
-        if ($args[0] -eq 'env' -and $args[1] -eq 'set') { return }
+        if ($args[0] -eq 'env' -and $args[1] -eq 'set') {
+          if ($global:maesterOfflineScenario.ContainsKey('FailMetadataSet') -and $global:maesterOfflineScenario.FailMetadataSet -and $args[4] -eq 'AUTOMATION_EXISTING_RUNBOOK_METADATA') { $global:LASTEXITCODE = 1; return }
+          $global:maesterOfflineWrites[[string]$args[4]] = [string]$args[5]
+          return
+        }
         throw "Unexpected azd call: $($args -join ' ')"
       }
       function az {
@@ -50,6 +55,11 @@ BeforeAll {
             $content = if ($global:maesterOfflineScenario.ContainsKey('PublishedContent')) { $global:maesterOfflineScenario.PublishedContent } else { $global:maesterOfflineScenario.LocalContent }
             [IO.File]::WriteAllText($outputPath, $content)
             return
+          }
+          if ($command -like '*/runbooks/maester-runbook?*') {
+            if ($global:maesterOfflineScenario.ContainsKey('FailMetadataRead') -and $global:maesterOfflineScenario.FailMetadataRead) { $global:LASTEXITCODE = 1; return '' }
+            if ($global:maesterOfflineScenario.ContainsKey('RawMetadataRead')) { return $global:maesterOfflineScenario.RawMetadataRead }
+            return ($global:maesterOfflineScenario.RunbookMetadata | ConvertTo-Json -Depth 12 -Compress)
           }
           if ($global:maesterOfflineScenario.ContainsKey('UnreadableKind') -and $command -like "*/$($global:maesterOfflineScenario.UnreadableKind)?*") { $global:LASTEXITCODE = 1; return '' }
           if ($command -like '*resourceGroups/rg-test?api-version=2021-04-01*') { return (@{ id = '/subscriptions/sub-test/resourceGroups/rg-test'; name = 'rg-test'; type = 'Microsoft.Resources/resourceGroups' } | ConvertTo-Json -Compress) }
@@ -74,7 +84,13 @@ BeforeAll {
     param([string]$GroupExists = 'true')
     $values = @{ AZURE_ENV_NAME = 'test'; AZURE_SUBSCRIPTION_ID = 'sub-test'; AZURE_TENANT_ID = 'tenant-test'; AZURE_RESOURCE_GROUP = 'rg-test'; AZURE_LOCATION = 'westus' }
     $account = [pscustomobject]@{ id = $script:accountId; name = 'aa-test'; type = 'Microsoft.Automation/automationAccounts'; identity = @{ principalId = $script:principalId; type = 'SystemAssigned' }; tags = @{ workload = 'maester'; solution = 'automation-account'; environment = 'test'; managedBy = 'azd' } }
-    @{ Values = $values; GroupExists = $GroupExists; AccountList = @{ value = @($account) }; Account = $account; ScheduleList = @{ value = @($script:owned, $script:unrelated) }; Schedules = @{ value = @(@{ id = "$($script:accountId)/schedules/maester-weekly-sunday"; name = 'maester-weekly-sunday'; type = 'Microsoft.Automation/automationAccounts/schedules'; properties = @{ isEnabled = $true; startTime = '2026-10-18T10:34:00Z'; timeZone = 'UTC'; interval = 1 } }) }; Runbooks = @{ value = @(@{ id = "$($script:accountId)/runbooks/maester-runbook"; name = 'maester-runbook'; type = 'Microsoft.Automation/automationAccounts/runbooks'; properties = @{ state = 'Published'; runbookType = 'PowerShell' } }) } }
+    $scenario = @{ Values = $values; GroupExists = $GroupExists; AccountList = @{ value = @($account) }; Account = $account; ScheduleList = @{ value = @($script:owned, $script:unrelated) }; Schedules = @{ value = @(@{ id = "$($script:accountId)/schedules/maester-weekly-sunday"; name = 'maester-weekly-sunday'; type = 'Microsoft.Automation/automationAccounts/schedules'; properties = @{ isEnabled = $true; startTime = '2026-10-18T10:34:00Z'; timeZone = 'UTC'; interval = 1 } }) }; Runbooks = @{ value = @(@{ id = "$($script:accountId)/runbooks/maester-runbook"; name = 'maester-runbook'; type = 'Microsoft.Automation/automationAccounts/runbooks'; properties = @{ state = 'Published'; runbookType = 'PowerShell' } }) } }
+    $scenario.RunbookMetadata = @{
+      id = "$($script:accountId)/runbooks/maester-runbook"; name = 'maester-runbook'
+      type = 'Microsoft.Automation/automationAccounts/runbooks'; location = 'westus'
+      tags = @{}; properties = @{ state = 'Published'; runbookType = 'PowerShell'; description = 'Existing description'; logProgress = $true; logVerbose = $false; logActivityTrace = 0 }
+    }
+    return $scenario
   }
 }
 
@@ -379,5 +395,98 @@ Describe 'Explicit custom metadata preprovision binding' {
     $script:customScenario.Account.tags.solution = 'reviewed custom deployment'
     { Invoke-OfflinePreProvision -Scenario $script:customScenario } | Should -Throw '*does not match the template deployment target*'
     ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|PATCH|POST|DELETE)'
+  }
+}
+
+
+Describe 'Fresh existing runbook metadata capture' {
+  BeforeEach {
+    $script:metadataScenario = New-OfflineScenario
+    $script:metadataScenario.Values.AUTOMATION_OWNED_ACCOUNT_ID = $script:accountId
+    $script:metadataScenario.Values.AUTOMATION_OWNED_PRINCIPAL_ID = $script:principalId
+    $script:metadataScenario.Values.AUTOMATION_OWNED_JOB_SCHEDULE_ID = $script:scheduleId
+    $script:metadataScenario.Values.AUTOMATION_EXISTING_RUNBOOK_METADATA = '{"stale":"must not be reused"}'
+  }
+
+  It 'captures the fresh exact GET instead of stale environment or list metadata' {
+    $script:metadataScenario.RunbookMetadata.properties.description = "Fresh 'quoted' Δ`nmetadata"
+    $script:metadataScenario.RunbookMetadata.properties.logProgress = $false
+    $script:metadataScenario.RunbookMetadata.properties.logVerbose = $true
+    $script:metadataScenario.RunbookMetadata.properties.logActivityTrace = 3
+    $script:metadataScenario.RunbookMetadata.tags = @{ Owner = 'Custom owner'; Empty = '' }
+    Invoke-OfflinePreProvision -Scenario $script:metadataScenario
+    $snapshot = $global:maesterOfflineWrites.AUTOMATION_EXISTING_RUNBOOK_METADATA | ConvertFrom-Json -AsHashtable
+    $snapshot.location | Should -BeExactly 'westus'
+    $snapshot.properties.description | Should -BeExactly "Fresh 'quoted' Δ`nmetadata"
+    $snapshot.properties.logProgress | Should -BeFalse
+    $snapshot.properties.logVerbose | Should -BeTrue
+    $snapshot.properties.logActivityTrace | Should -Be 3
+    $snapshot.tags.Owner | Should -BeExactly 'Custom owner'
+    $snapshot.tags.Empty | Should -BeExactly ''
+    $calls = $global:maesterOfflineCalls -join '|'
+    $calls | Should -Match 'runbooks/maester-runbook\?api-version=2024-10-23'
+    $calls.IndexOf('AUTOMATION_EXISTING_RUNBOOK_METADATA') | Should -BeLessThan $calls.IndexOf('AUTOMATION_EXISTING_RESOURCES true')
+    $calls | Should -Not -Match '--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'refreshes metadata on every provision instead of reusing the previous snapshot' {
+    Invoke-OfflinePreProvision -Scenario $script:metadataScenario
+    $script:metadataScenario.Values.AUTOMATION_EXISTING_RUNBOOK_METADATA = $global:maesterOfflineWrites.AUTOMATION_EXISTING_RUNBOOK_METADATA
+    $script:metadataScenario.RunbookMetadata.properties.description = 'Changed between attempts'
+    Invoke-OfflinePreProvision -Scenario $script:metadataScenario
+    ($global:maesterOfflineWrites.AUTOMATION_EXISTING_RUNBOOK_METADATA | ConvertFrom-Json).properties.description | Should -BeExactly 'Changed between attempts'
+  }
+
+  It 'fails before any environment write on a failed fresh GET' {
+    $script:metadataScenario.FailMetadataRead = $true
+    { Invoke-OfflinePreProvision -Scenario $script:metadataScenario } | Should -Throw '*Could not inspect fresh runbook metadata*'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'fails before any environment write on <Label> metadata JSON' -ForEach @(
+    @{ Label = 'empty'; Json = '' }, @{ Label = 'malformed'; Json = '{invalid' }, @{ Label = 'missing'; Json = '{}' }
+  ) {
+    $script:metadataScenario.RawMetadataRead = $Json
+    { Invoke-OfflinePreProvision -Scenario $script:metadataScenario } | Should -Throw
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'fails before any environment write when the exact read changed <Field>' -ForEach @(
+    @{ Field = 'id'; Value = '/subscriptions/other/runbooks/maester-runbook' },
+    @{ Field = 'type'; Value = 'Microsoft.Web/sites' }, @{ Field = 'state'; Value = 'Edit' },
+    @{ Field = 'runbookType'; Value = 'Python3' }, @{ Field = 'logProgress'; Value = 'false' }
+  ) {
+    if ($Field -in @('id', 'type')) { $script:metadataScenario.RunbookMetadata[$Field] = $Value }
+    else { $script:metadataScenario.RunbookMetadata.properties[$Field] = $Value }
+    { Invoke-OfflinePreProvision -Scenario $script:metadataScenario } | Should -Throw '*fresh runbook metadata*'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'does not enable omission flags if persisting the verified snapshot is interrupted' {
+    $script:metadataScenario.FailMetadataSet = $true
+    { Invoke-OfflinePreProvision -Scenario $script:metadataScenario } | Should -Throw '*AUTOMATION_EXISTING_RUNBOOK_METADATA*'
+    $global:maesterOfflineWrites.Count | Should -Be 0
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set -e test AUTOMATION_EXISTING_RESOURCES|--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'clears stale metadata on a verified fresh path without reading a runbook' {
+    $fresh = New-OfflineScenario -GroupExists 'false'
+    $fresh.Values.AUTOMATION_EXISTING_RUNBOOK_METADATA = '{"stale":true}'
+    Invoke-OfflinePreProvision -Scenario $fresh
+    $global:maesterOfflineWrites.AUTOMATION_EXISTING_RUNBOOK_METADATA | Should -BeExactly '{}'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'runbooks/maester-runbook\?'
+  }
+
+  It 'accepts an untagged fresh deployment on a later receipt-bound provision' {
+    $fresh = New-OfflineScenario -GroupExists 'false'
+    Invoke-OfflinePreProvision -Scenario $fresh
+    $global:maesterOfflineWrites.AUTOMATION_EXISTING_RUNBOOK_METADATA | Should -BeExactly '{}'
+    # Model the normal postdeployment receipt, without changing its ownership rules.
+    $script:metadataScenario.RunbookMetadata.tags = $null
+    Invoke-OfflinePreProvision -Scenario $script:metadataScenario
+    $snapshot = $global:maesterOfflineWrites.AUTOMATION_EXISTING_RUNBOOK_METADATA | ConvertFrom-Json -AsHashtable
+    $snapshot.Contains('tags') | Should -BeTrue
+    $snapshot.tags | Should -BeNullOrEmpty
+    $snapshot.properties.logProgress | Should -BeTrue
   }
 }

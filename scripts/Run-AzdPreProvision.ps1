@@ -203,6 +203,18 @@ if ($preserveUpgradeAccess) {
 if ($ownership.OwnedJobScheduleId) {
   Write-Host "Verified existing template jobSchedule '$($ownership.OwnedJobScheduleId)'; its linkage and resource lock remain intact."
 }
+$runbookMetadata = @{}
+if ($verifiedResources.Existing) {
+  # PUT omission resets writable metadata in Azure. Capture a fresh exact read,
+  # rather than replaying stale environment data or a partial list response.
+  $metadataJson = & az rest --method GET --uri "https://management.azure.com$expectedAccountId/runbooks/maester-runbook?api-version=2024-10-23" --subscription $SubscriptionId -o json
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($metadataJson)) {
+    throw 'Could not inspect fresh runbook metadata before provisioning.'
+  }
+  $runbookMetadata = Get-MaesterRunbookPreservationMetadata -ExpectedAccountId $expectedAccountId `
+    -Runbook ($metadataJson | ConvertFrom-Json -AsHashtable -ErrorAction Stop)
+}
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_EXISTING_RUNBOOK_METADATA' -Value ($runbookMetadata | ConvertTo-Json -Depth 5 -Compress)
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_JOB_SCHEDULE_ID' -Value $ownership.JobScheduleId
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_EXISTING_RESOURCES' -Value $verifiedResources.Existing.ToString().ToLowerInvariant()
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_UPGRADE_PRESERVE_ACCESS' -Value $preserveUpgradeAccess.ToString().ToLowerInvariant()

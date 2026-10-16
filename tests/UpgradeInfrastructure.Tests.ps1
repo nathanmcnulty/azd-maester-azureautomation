@@ -30,7 +30,8 @@ BeforeAll {
     }
     $runbook = [pscustomobject]@{
       id = "$script:upgradeAccountId/runbooks/maester-runbook"; name = 'maester-runbook'
-      type = 'Microsoft.Automation/automationAccounts/runbooks'
+      type = 'Microsoft.Automation/automationAccounts/runbooks'; location = 'West US'
+      tags = @{ 'owner team' = 'Security'; purpose = 'keep runbook tags' }
       properties = @{ state = 'Published'; runbookType = 'PowerShell'; logProgress = $false; logVerbose = $true; description = 'User-maintained runbook' }
     }
     $otherJob = [pscustomobject]@{
@@ -66,6 +67,7 @@ BeforeAll {
         AUTOMATION_OWNED_JOB_SCHEDULE_ID = $script:upgradeJobId
       }
       Account = $fixture.Account
+      Runbook = $fixture.Runbook | ConvertTo-Json -Depth 20 | ConvertFrom-Json
       Responses = @{
         accounts = [pscustomobject]@{ value = @($fixture.Account) }; jobSchedules = [pscustomobject]@{ value = $fixture.JobSchedules }
         schedules = [pscustomobject]@{ value = $fixture.Schedules }; runbooks = [pscustomobject]@{ value = $fixture.Runbooks }
@@ -109,11 +111,13 @@ BeforeAll {
           return
         }
         if ($command -like '*resourceGroups/rg-test?api-version=2021-04-01*') { return (@{ id = '/subscriptions/sub-test/resourceGroups/rg-test'; name = 'rg-test'; type = 'Microsoft.Resources/resourceGroups' } | ConvertTo-Json -Compress) }
-        $kind = if ($command -match '/(jobSchedules|schedules|runbooks)\?') { $Matches[1] }
+        $kind = if ($command -match '/runbooks/maester-runbook\?') { 'runbook' }
+          elseif ($command -match '/(jobSchedules|schedules|runbooks)\?') { $Matches[1] }
           elseif ($command -match '/automationAccounts\?') { 'accounts' } else { 'account' }
         if ($global:maesterUpgradeScenario.FailKind -eq $kind) { $global:LASTEXITCODE = 1; return '' }
         if ($global:maesterUpgradeScenario.RawKind -eq $kind) { return $global:maesterUpgradeScenario.RawResponse }
-        $response = if ($kind -eq 'account') { $global:maesterUpgradeScenario.Account } else { $global:maesterUpgradeScenario.Responses[$kind] }
+        $response = if ($kind -eq 'account') { $global:maesterUpgradeScenario.Account }
+          elseif ($kind -eq 'runbook') { $global:maesterUpgradeScenario.Runbook } else { $global:maesterUpgradeScenario.Responses[$kind] }
         return ($response | ConvertTo-Json -Depth 20 -Compress)
       }
       & (Join-Path $PSScriptRoot '../scripts/Run-AzdPreProvision.ps1')
@@ -281,6 +285,53 @@ Describe 'Preprovision preservation decision uses readable complete live invento
     ($scenario.Responses | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $before
   }
 
+  It 'uses one fresh exact metadata read instead of stale environment values or list metadata before environment writes' {
+    $scenario = New-UpgradePreProvisionScenario
+    $scenario.Values.AUTOMATION_EXISTING_RUNBOOK_METADATA = '{"location":"stale","properties":{"description":"stale"},"tags":{"owner":"stale"}}'
+    $scenario.Runbook.properties.description = 'Fresh exact GET metadata'
+    $scenario.Runbook.properties.logProgress = $true
+    $scenario.Runbook.properties.logVerbose = $false
+    $scenario.Runbook.properties | Add-Member -NotePropertyName logActivityTrace -NotePropertyValue 3
+    Invoke-UpgradePreProvision -Scenario $scenario
+    $gets = @($global:maesterUpgradeCalls | Where-Object { $_ -match '^az rest --method GET --uri https://management\.azure\.com.*/runbooks/maester-runbook\?api-version=2024-10-23 ' })
+    $gets.Count | Should -Be 1
+    $prefix = 'azd env set -e test AUTOMATION_EXISTING_RUNBOOK_METADATA '
+    $sets = @($global:maesterUpgradeCalls | Where-Object { $_.StartsWith($prefix) })
+    $sets.Count | Should -Be 1
+    $global:maesterUpgradeCalls.IndexOf($gets[0]) | Should -BeLessThan $global:maesterUpgradeCalls.IndexOf($sets[0])
+    $snapshot = $sets[0].Substring($prefix.Length) | ConvertFrom-Json -AsHashtable
+    $snapshot.location | Should -BeExactly 'West US'
+    $snapshot.properties.description | Should -BeExactly 'Fresh exact GET metadata'
+    $snapshot.properties.logProgress | Should -BeTrue
+    $snapshot.properties.logVerbose | Should -BeFalse
+    $snapshot.properties.logActivityTrace | Should -Be 3
+    $snapshot.tags['owner team'] | Should -BeExactly 'Security'
+    @($snapshot.Keys).Count | Should -Be 3
+    @($snapshot.properties.Keys).Count | Should -Be 4
+    $scenario.Responses.runbooks.value[0].properties.description | Should -BeExactly 'User-maintained runbook'
+    ($global:maesterUpgradeCalls -join '|') | Should -Not -Match 'DELETE|--method PUT|lock delete'
+  }
+
+  It 'clears a stale metadata snapshot for a fresh deployment without reading an existing runbook' {
+    $scenario = New-UpgradePreProvisionScenario
+    $scenario.GroupExists = 'false'
+    $scenario.Values.AUTOMATION_EXISTING_RUNBOOK_METADATA = '{"location":"stale","properties":{"description":"stale"}}'
+    foreach ($name in @('AUTOMATION_OWNED_ACCOUNT_ID', 'AUTOMATION_OWNED_PRINCIPAL_ID', 'AUTOMATION_OWNED_JOB_SCHEDULE_ID')) { $scenario.Values.Remove($name) }
+    Invoke-UpgradePreProvision -Scenario $scenario
+    ($global:maesterUpgradeCalls -join '|') | Should -Match 'azd env set -e test AUTOMATION_EXISTING_RUNBOOK_METADATA \{\}'
+    ($global:maesterUpgradeCalls -join '|') | Should -Match 'azd env set -e test AUTOMATION_EXISTING_RESOURCES false'
+    ($global:maesterUpgradeCalls -join '|') | Should -Not -Match '/runbooks/maester-runbook\?'
+  }
+
+  It 'rejects fresh exact runbook <Field> drift before any environment write' -ForEach @(
+    @{ Field = 'id' }, @{ Field = 'name' }, @{ Field = 'type' }, @{ Field = 'location' }
+  ) {
+    $scenario = New-UpgradePreProvisionScenario
+    $scenario.Runbook.$Field = if ($Field -eq 'location') { $null } else { 'changed-resource' }
+    { Invoke-UpgradePreProvision -Scenario $scenario } | Should -Throw
+    ($global:maesterUpgradeCalls -join '|') | Should -Not -Match 'env set|DELETE|--method PUT'
+  }
+
   It 'verifies exact storage and account outputs before enabling bounded runtime-only preservation' {
     $scenario = New-UpgradePreProvisionScenario
     $scenario.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'true'
@@ -312,7 +363,7 @@ Describe 'Preprovision preservation decision uses readable complete live invento
   }
 
   It 'rejects an unreadable <Kind> inventory before any environment write' -ForEach @(
-    @{ Kind = 'accounts' }, @{ Kind = 'account' }, @{ Kind = 'jobSchedules' }, @{ Kind = 'schedules' }, @{ Kind = 'runbooks' }
+    @{ Kind = 'accounts' }, @{ Kind = 'account' }, @{ Kind = 'jobSchedules' }, @{ Kind = 'schedules' }, @{ Kind = 'runbooks' }, @{ Kind = 'runbook' }
   ) {
     $scenario = New-UpgradePreProvisionScenario; $scenario.FailKind = $Kind
     { Invoke-UpgradePreProvision -Scenario $scenario } | Should -Throw '*Could not inspect*'
@@ -320,7 +371,7 @@ Describe 'Preprovision preservation decision uses readable complete live invento
   }
 
   It 'rejects malformed JSON for <Kind> before any environment write' -ForEach @(
-    @{ Kind = 'schedules' }, @{ Kind = 'runbooks' }
+    @{ Kind = 'schedules' }, @{ Kind = 'runbooks' }, @{ Kind = 'runbook' }
   ) {
     $scenario = New-UpgradePreProvisionScenario; $scenario.RawKind = $Kind; $scenario.RawResponse = '{malformed'
     { Invoke-UpgradePreProvision -Scenario $scenario } | Should -Throw
@@ -392,12 +443,27 @@ Describe 'Compiled ARM preservation branches' {
 
     function Resolve-UpgradeArmExpression {
       param($Expression, [hashtable]$Parameters)
-      # Deliberately restricted to the emitted conditions and runbook union.
+      # Deliberately restricted to the emitted conditions and runbook metadata projections.
       # Unknown functions fail closed; this does not emulate an ARM deployment.
       if ($Expression -isnot [string]) { return $Expression }
       $text = $Expression.Trim()
       if ($text.StartsWith('[') -and $text.EndsWith(']')) { $text = $text.Substring(1, $text.Length - 2) }
       if ($text -match "^'(?:[^']|'')*'$") { return $text.Substring(1, $text.Length - 2).Replace("''", "'") }
+      if ($text -match "^variables\('(?<variableName>[^']+)'\)(?<propertyPath>(?:\.[a-zA-Z][a-zA-Z0-9]*)+)$") {
+        $value = Resolve-UpgradeArmExpression -Expression "variables('$($Matches.variableName)')" -Parameters $Parameters
+        $propertyPath = $Matches.propertyPath
+        foreach ($name in $propertyPath.TrimStart('.').Split('.')) {
+          if ($value -is [Collections.IDictionary]) {
+            if (-not $value.Contains($name)) { throw "Missing compiled ARM property: $name" }
+            $value = $value[$name]
+          }
+          else {
+            if (-not $value.PSObject.Properties[$name]) { throw "Missing compiled ARM property: $name" }
+            $value = $value.$name
+          }
+        }
+        return $value
+      }
       if ($text -notmatch '^(?<name>[a-zA-Z]+)\((?<arguments>.*)\)$') { throw "Unsupported compiled ARM expression: $text" }
       $functionName = $Matches.name
       $arguments = @(Split-UpgradeArmArguments -Text $Matches.arguments)
@@ -409,6 +475,17 @@ Describe 'Compiled ARM preservation branches' {
       switch ($functionName) {
         'true' { return $true }
         'false' { return $false }
+        'null' { return $null }
+        'json' { return ConvertFrom-Json -InputObject $values[0] -AsHashtable }
+        'contains' { return $values[0].Contains([string]$values[1]) }
+        'tryGet' {
+          $value = $values[0]
+          foreach ($key in $values[1..($values.Count - 1)]) {
+            if ($null -eq $value -or -not $value.Contains([string]$key)) { return $null }
+            $value = $value[[string]$key]
+          }
+          return $value
+        }
         'parameters' {
           if (-not $Parameters.ContainsKey([string]$values[0])) { throw "Missing test parameter: $($values[0])" }
           return $Parameters[[string]$values[0]]
@@ -438,9 +515,11 @@ Describe 'Compiled ARM preservation branches' {
     }
 
     function Get-UpgradeArmParameters {
-      param([string]$Existing = 'true', [string]$Preserve = 'true')
+      param([string]$Existing = 'true', [string]$Preserve = 'true',
+        [string]$MetadataJson = '{"location":"West US","properties":{"description":"User-maintained runbook","logProgress":false,"logVerbose":true,"logActivityTrace":4},"tags":{"owner team":"Security","purpose":"keep runbook tags"}}')
       @{
         existingAutomationResourcesOption = $Existing; preserveUpgradeAccessOption = $Preserve
+        existingRunbookMetadataJson = $MetadataJson; location = 'eastus2'
         includeWebAppOption = 'true'; includeExchangeOption = 'true'; includeTeamsOption = 'true'; enableResourceLocks = $true
       }
     }
@@ -494,16 +573,73 @@ Describe 'Compiled ARM preservation branches' {
     }
   }
 
-  It 'omits seed content and user runbook settings with existing=<Existing>, preserve=<Preserve>' -ForEach @(
+  It 'replays verified existing metadata without seed or read-only fields with existing=<Existing>, preserve=<Preserve>' -ForEach @(
     @{ Existing = 'true'; Preserve = 'false' }, @{ Existing = 'true'; Preserve = 'true' }, @{ Existing = 'false'; Preserve = 'true' }
   ) {
     $runbook = @($script:upgradeTemplate.resources | Where-Object type -EQ 'Microsoft.Automation/automationAccounts/runbooks')[0]
-    $properties = Resolve-UpgradeArmExpression -Expression $runbook.properties -Parameters (Get-UpgradeArmParameters -Existing $Existing -Preserve $Preserve)
-    @($properties.Keys).Count | Should -Be 2
+    $parameters = Get-UpgradeArmParameters -Existing $Existing -Preserve $Preserve
+    $properties = Resolve-UpgradeArmExpression -Expression $runbook.properties -Parameters $parameters
+    @($properties.Keys).Count | Should -Be 6
     $properties.runbookType | Should -Be 'PowerShell'
     $properties.runtimeEnvironment | Should -Match '^PowerShell-(74|76)-Maester$'
     $properties.runtimeEnvironment | Should -Be $script:upgradeTemplate.variables.runtimeEnvironmentName
-    foreach ($key in @('publishContentLink', 'description', 'logProgress', 'logVerbose')) { $properties.ContainsKey($key) | Should -BeFalse }
+    $properties.description | Should -BeExactly 'User-maintained runbook'
+    $properties.logProgress | Should -BeFalse
+    $properties.logVerbose | Should -BeTrue
+    $properties.logActivityTrace | Should -Be 4
+    (Resolve-UpgradeArmExpression -Expression $runbook.location -Parameters $parameters) | Should -BeExactly 'West US'
+    $tags = Resolve-UpgradeArmExpression -Expression $runbook.tags -Parameters $parameters
+    @($tags.Keys).Count | Should -Be 2
+    $tags['owner team'] | Should -BeExactly 'Security'
+    $tags.purpose | Should -BeExactly 'keep runbook tags'
+    foreach ($key in @('publishContentLink', 'draft', 'state', 'creationTime', 'lastModifiedTime', 'jobCount', 'outputTypes', 'parameters', 'provisioningState')) {
+      $properties.ContainsKey($key) | Should -BeFalse
+    }
+  }
+
+  It 'preserves explicit false, zero, empty description and empty tags without defaults' {
+    $runbook = @($script:upgradeTemplate.resources | Where-Object type -EQ 'Microsoft.Automation/automationAccounts/runbooks')[0]
+    $parameters = Get-UpgradeArmParameters -MetadataJson '{"location":"North Europe","properties":{"description":"","logProgress":true,"logVerbose":false,"logActivityTrace":0},"tags":{}}'
+    $properties = Resolve-UpgradeArmExpression -Expression $runbook.properties -Parameters $parameters
+    $properties.ContainsKey('description') | Should -BeTrue
+    $properties.description | Should -BeExactly ''
+    $properties.logProgress | Should -BeTrue
+    $properties.logVerbose | Should -BeFalse
+    $properties.ContainsKey('logActivityTrace') | Should -BeTrue
+    $properties.logActivityTrace | Should -Be 0
+    $tags = Resolve-UpgradeArmExpression -Expression $runbook.tags -Parameters $parameters
+    $tags | Should -BeOfType [hashtable]
+    @($tags.Keys).Count | Should -Be 0
+    (Resolve-UpgradeArmExpression -Expression $runbook.location -Parameters $parameters) | Should -BeExactly 'North Europe'
+  }
+
+  It 'keeps absent optional metadata absent and never forwards extra snapshot fields' {
+    $runbook = @($script:upgradeTemplate.resources | Where-Object type -EQ 'Microsoft.Automation/automationAccounts/runbooks')[0]
+    $parameters = Get-UpgradeArmParameters -MetadataJson '{"location":"westus","properties":{"publishContentLink":{"uri":"https://example.invalid/seed.ps1"},"draft":{"inEdit":true},"state":"Edit","creationTime":"ignored","lastModifiedTime":"ignored","parameters":{"Secret":"ignored"},"jobCount":2,"provisioningState":"Succeeded"},"identity":{"type":"SystemAssigned"},"etag":"ignored"}'
+    $properties = Resolve-UpgradeArmExpression -Expression $runbook.properties -Parameters $parameters
+    @($properties.Keys).Count | Should -Be 2
+    $properties.Keys | Should -Contain 'runbookType'
+    $properties.Keys | Should -Contain 'runtimeEnvironment'
+    (Resolve-UpgradeArmExpression -Expression $runbook.tags -Parameters $parameters) | Should -BeNullOrEmpty
+    @($runbook.PSObject.Properties.Name | Where-Object { $_ -in @('identity', 'etag', 'draft') }).Count | Should -Be 0
+  }
+
+  It 'fails closed when an existing snapshot is missing its required <Field>' -ForEach @(
+    @{ Field = 'location'; MetadataJson = '{"properties":{}}'; Expression = 'location' }
+    @{ Field = 'properties'; MetadataJson = '{"location":"westus"}'; Expression = 'properties' }
+    @{ Field = 'entire snapshot'; MetadataJson = '{}'; Expression = 'location' }
+  ) {
+    $runbook = @($script:upgradeTemplate.resources | Where-Object type -EQ 'Microsoft.Automation/automationAccounts/runbooks')[0]
+    $parameters = Get-UpgradeArmParameters -MetadataJson $MetadataJson
+    { Resolve-UpgradeArmExpression -Expression $runbook.$Expression -Parameters $parameters } | Should -Throw '*Missing compiled ARM property*'
+  }
+
+  It 'uses a single derived JSON-string parameter for the verified snapshot' {
+    $parameter = $script:upgradeTemplate.parameters.existingRunbookMetadataJson
+    $parameter.type | Should -Be 'string'
+    $parameter.defaultValue | Should -BeExactly '{}'
+    $mapping = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../infra/main.parameters.json') -Raw | ConvertFrom-Json
+    $mapping.parameters.existingRunbookMetadataJson.value | Should -BeExactly '${AUTOMATION_EXISTING_RUNBOOK_METADATA}'
   }
 
   It 'keeps optional packages disabled in bounded mode when their options are false' {
@@ -523,6 +659,13 @@ Describe 'Compiled ARM preservation branches' {
     $properties.publishContentLink.contentHash.value | Should -Match '^[A-F0-9]{64}$'
     $properties.logProgress | Should -BeTrue
     $properties.logVerbose | Should -BeFalse
+    $properties.description | Should -BeExactly 'Runbook to execute Maester report workflow'
+    $properties.ContainsKey('logActivityTrace') | Should -BeFalse
+    $parameters = Get-UpgradeArmParameters -Existing 'false' -Preserve 'false' -MetadataJson '{invalid stale snapshot'
+    (Resolve-UpgradeArmExpression -Expression $runbook.properties -Parameters $parameters | ConvertTo-Json -Depth 10 -Compress) |
+      Should -BeExactly ($properties | ConvertTo-Json -Depth 10 -Compress)
+    (Resolve-UpgradeArmExpression -Expression $runbook.location -Parameters $parameters) | Should -BeExactly 'eastus2'
+    (Resolve-UpgradeArmExpression -Expression $runbook.tags -Parameters $parameters) | Should -BeNullOrEmpty
   }
 
   It 'keeps fresh schedule defaults and dependencies without emitting an association' {

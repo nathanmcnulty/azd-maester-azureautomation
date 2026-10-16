@@ -252,3 +252,57 @@ function Assert-MaesterExistingAutomationResources {
   }
   return [pscustomobject]@{ Existing = $true; JobSchedule = $selected.JobSchedule; Schedule = $selected.Schedule; Runbook = $selected.Runbook }
 }
+
+function Get-MaesterRunbookPreservationMetadata {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$ExpectedAccountId,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Runbook
+  )
+
+  $expectedId = "$ExpectedAccountId/runbooks/maester-runbook"
+  $properties = $Runbook['properties']
+  if ([string]$Runbook['id'] -ine $expectedId -or [string]$Runbook['name'] -ine 'maester-runbook' -or
+      [string]$Runbook['type'] -ine 'Microsoft.Automation/automationAccounts/runbooks' -or
+      $properties -isnot [System.Collections.IDictionary] -or
+      [string]$properties['state'] -ine 'Published' -or [string]$properties['runbookType'] -ine 'PowerShell') {
+    throw 'The fresh runbook metadata read does not match the exact published PowerShell target.'
+  }
+  if ($Runbook['location'] -isnot [string] -or [string]::IsNullOrWhiteSpace($Runbook['location'])) {
+    throw 'The fresh runbook metadata has no valid location.'
+  }
+
+  # Only writable metadata is replayed. Content, draft, state, parameters,
+  # timestamps and other response-only fields must never enter the ARM request.
+  $metadata = [ordered]@{ location = $Runbook['location']; properties = [ordered]@{} }
+  foreach ($name in @('description', 'logProgress', 'logVerbose', 'logActivityTrace')) {
+    if (-not $properties.Contains($name)) { continue }
+    $value = $properties[$name]
+    $valid = switch ($name) {
+      'description' { $value -is [string] }
+      'logProgress' { $value -is [bool] }
+      'logVerbose' { $value -is [bool] }
+      'logActivityTrace' { ($value -is [int] -or $value -is [long]) -and $value -ge [int]::MinValue -and $value -le [int]::MaxValue }
+    }
+    if (-not $valid) { throw "The fresh runbook metadata property '$name' has an unsupported null or value type." }
+    $metadata.properties[$name] = $value
+  }
+  if ($Runbook.Contains('tags')) {
+    if ($null -eq $Runbook['tags']) {
+      # ARM treats null resource properties as absent: retain the untagged state.
+      $metadata['tags'] = $null
+      return $metadata
+    }
+    if ($Runbook['tags'] -isnot [System.Collections.IDictionary]) {
+      throw 'The fresh runbook metadata tags must be a string-valued object.'
+    }
+    $metadata.tags = [ordered]@{}
+    foreach ($key in $Runbook['tags'].Keys) {
+      if ($key -isnot [string] -or $Runbook['tags'][$key] -isnot [string]) {
+        throw 'The fresh runbook metadata tags must be a string-valued object.'
+      }
+      $metadata.tags[$key] = $Runbook['tags'][$key]
+    }
+  }
+  return $metadata
+}
