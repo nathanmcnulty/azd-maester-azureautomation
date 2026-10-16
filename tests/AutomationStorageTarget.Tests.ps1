@@ -219,7 +219,7 @@ Describe 'Local compiler process failures' {
   }
 
   It 'rejects nonzero exit and compiler diagnostics, then removes temporary files' {
-    $pwsh = (Get-Command pwsh -CommandType Application -ErrorAction Stop).Source
+    $pwsh = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $originalOptOut = $env:POWERSHELL_TELEMETRY_OPTOUT
     $originalUpdateCheck = $env:POWERSHELL_UPDATECHECK
     try {
