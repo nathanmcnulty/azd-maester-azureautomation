@@ -167,11 +167,11 @@ function Resolve-MaesterMainDeploymentTarget {
       -AdoptAccountId ([string]$EnvironmentValues['AUTOMATION_ADOPT_ACCOUNT_ID']) `
       -AdoptPrincipalId ([string]$EnvironmentValues['AUTOMATION_ADOPT_PRINCIPAL_ID']) `
       -AdoptJobScheduleId ([string]$EnvironmentValues['AUTOMATION_ADOPT_JOB_SCHEDULE_ID'])
-    $association = @($inventory.value | Where-Object { [string]$_.name -ieq $ownership.OwnedJobScheduleId })
-    if ($association.Count -ne 1 -or [string]$association[0].id -ine "$id/jobSchedules/$($ownership.OwnedJobScheduleId)" -or
-        [string]$association[0].type -ine 'Microsoft.Automation/automationAccounts/jobSchedules') {
+    $association = @($inventory.value | Where-Object { [string]$_.id -ieq "$id/jobSchedules/$($ownership.OwnedJobScheduleId)" -or [string]$_.properties.jobScheduleId -ieq $ownership.OwnedJobScheduleId })
+    if ($association.Count -ne 1) {
       throw 'The custom metadata preservation association does not match its exact account, ID, and type.'
     }
+    Assert-MaesterJobScheduleIdentity -ExpectedAccountId $id -ExpectedJobScheduleId $ownership.OwnedJobScheduleId -JobSchedule $association[0]
   }
   if ($Kind -eq 'FunctionApp' -and [string]$resource.kind -notmatch '(^|,)functionapp(,|$)') {
     throw "The deployed resource '$name' is not a Function App."

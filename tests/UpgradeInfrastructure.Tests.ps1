@@ -217,7 +217,8 @@ Describe 'Exact existing Automation preservation binding' {
   ) {
     $fixture = New-UpgradeFixture
     $fixture[$Kind].$Field = 'another-resource'
-    { Assert-UpgradeFixture -Fixture $fixture -RequireExisting } | Should -Throw '*disappeared, changed identity, or is ambiguous*'
+    $message = if ($Kind -eq 'Job') { '*association readback does not match its exact ID*' } else { '*disappeared, changed identity, or is ambiguous*' }
+    { Assert-UpgradeFixture -Fixture $fixture -RequireExisting } | Should -Throw $message
   }
 
   It 'rejects missing or duplicate <Inventory> targets' -ForEach @(
@@ -246,7 +247,8 @@ Describe 'Exact existing Automation preservation binding' {
       $fixture = New-UpgradeFixture
       if ($part -eq 'jobScheduleId') { $fixture.Job.properties.jobScheduleId = '44444444-4444-4444-4444-444444444444' }
       else { $fixture.Job.properties[$part].name = 'unrelated' }
-      { Assert-UpgradeFixture -Fixture $fixture } | Should -Throw '*does not match the template ownership receipt*'
+      $message = if ($part -eq 'jobScheduleId') { '*association readback does not match its exact ID*' } else { '*does not match the template ownership receipt*' }
+      { Assert-UpgradeFixture -Fixture $fixture } | Should -Throw $message
     }
   }
 

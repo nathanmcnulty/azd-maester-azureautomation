@@ -4,6 +4,8 @@ A normal provision still creates the complete solution. When preprovision verifi
 
 The ownership checks fail closed on unreadable, malformed, paginated, missing, conflicting, or ambiguous resources. A saved environment flag is not ownership evidence. A missing previously owned association, schedule, or published runbook requires reconciliation; it is never silently recreated. Existing adoption requires the exact live account ID, managed-identity principal ID, and association GUID. Do not manufacture receipts to bypass these checks.
 
+Azure Automation [jobSchedule GET responses](https://learn.microsoft.com/en-us/rest/api/automation/job-schedule/get?view=rest-automation-2024-10-23) can omit top-level `name` and `type`. Association identity therefore requires the exact full resource ID and matching `properties.jobScheduleId`; any supplied name/type must agree. The required GUID is never recovered from a label, raw responses are not rewritten, and a replacement GUID still requires explicit reconciliation even when schedule/runbook linkage is unchanged. Schedule and runbook resource checks remain strict.
+
 ## Bounded runtime-only mode
 
 For an existing verified deployment, explicitly set:

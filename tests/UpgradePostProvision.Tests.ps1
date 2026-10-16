@@ -70,12 +70,31 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
   function Grant-ServicePrincipalAppRoleAssignment { }
   function Test-DirectoryRoleAssignment { }
   function Test-AzureReaderRoleAssignment { }
+  function Set-UpgradeRawJobSchedule {
+    # Raw GET/list response shape: no synthetic ARM name or type fields.
+    $json = @'
+{
+  "id": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/rg-test/providers/Microsoft.Automation/automationAccounts/aa-exact-output/jobSchedules/22222222-2222-4222-8222-222222222222",
+  "properties": {
+    "jobScheduleId": "22222222-2222-4222-8222-222222222222",
+    "schedule": { "name": "maester-weekly-sunday" },
+    "runbook": { "name": "maester-runbook" },
+    "parameters": { "IncludeAzure": "false", "ExistingParameter": "retained" },
+    "runOn": "existing-hybrid-worker"
+  }
+}
+'@
+    $global:upgradeFixture.Job = $json | ConvertFrom-Json
+    $global:upgradeFixture.JobList = [pscustomobject]@{ value = @($global:upgradeFixture.Job) }
+    $global:upgradeFixture.ReadbackJob = $json | ConvertFrom-Json
+  }
   function Set-UpgradeCustomMetadata {
     $fixture = $global:upgradeFixture
     $oldId = $fixture.Account.id
     $newId = $oldId -replace '/aa-exact-output$', '/aa-test'
     $fixture.Account.id = $newId; $fixture.Account.name = 'aa-test'
     foreach ($item in @($fixture.Job, $fixture.Schedule, $fixture.Runbook)) { $item.id = $item.id.Replace($oldId, $newId) }
+    if ($null -ne $fixture.ReadbackJob) { $fixture.ReadbackJob.id = $fixture.ReadbackJob.id.Replace($oldId, $newId) }
     $fixture.Values.automationAccountName = 'aa-test'
     $fixture.Values.AUTOMATION_OWNED_ACCOUNT_ID = $newId
     $fixture.Values.AUTOMATION_ADOPT_SOLUTION_TAG = 'Reviewed custom deployment'
@@ -171,6 +190,118 @@ Describe 'Existing upgrade postdeployment preservation' {
     Should -Invoke Test-DirectoryRoleAssignment -Times 0 -Exactly
     Should -Invoke Test-AzureReaderRoleAssignment -Times 0 -Exactly
     $global:upgradeFixture.GraphGrantCalls | Should -Be 0
+  }
+
+  It 'preserves raw missing-name/type inventory and exact readback through <Path>' -ForEach @(
+    @{ Path = 'Setup'; CustomMetadata = $false; Wrapper = $false },
+    @{ Path = 'Setup custom-tag MainTarget'; CustomMetadata = $true; Wrapper = $false },
+    @{ Path = 'postprovision custom-tag MainTarget'; CustomMetadata = $true; Wrapper = $true }
+  ) {
+    if ($Wrapper) { Import-UpgradeFixture -Wrapper }
+    Set-UpgradeRawJobSchedule
+    if ($CustomMetadata) { Set-UpgradeCustomMetadata }
+    $fixture = $global:upgradeFixture
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $beforeJob = $fixture.Job | ConvertTo-Json -Depth 30 -Compress
+    $beforeReadback = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+    $beforeSchedule = $fixture.Schedule | ConvertTo-Json -Depth 30 -Compress
+
+    if ($Wrapper) { Invoke-UpgradeWrapper }
+    else { Invoke-UpgradeSetup }
+
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.Job | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeJob
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeReadback
+    ($fixture.Schedule | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeSchedule
+    $fixture.Job.PSObject.Properties['name'] | Should -BeNullOrEmpty
+    $fixture.Job.PSObject.Properties['type'] | Should -BeNullOrEmpty
+    $fixture.Job.properties.parameters.ExistingParameter | Should -BeExactly 'retained'
+    $fixture.Job.properties.parameters.IncludeAzure | Should -BeExactly 'false'
+    $fixture.Job.properties.runOn | Should -BeExactly 'existing-hybrid-worker'
+    if (-not $Wrapper) {
+      $fixture.Calls | Should -Contain "GET https://management.azure.com$($fixture.Job.id)?api-version=2023-11-01"
+    }
+    ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+    $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
+    Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
+    Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
+    Should -Invoke Grant-ServicePrincipalAppRoleAssignment -Times 0 -Exactly
+    Should -Invoke Test-DirectoryRoleAssignment -Times 0 -Exactly
+    Should -Invoke Test-AzureReaderRoleAssignment -Times 0 -Exactly
+  }
+
+  It 'rejects raw association <Problem> in <Response> without writes or receipt changes' -ForEach @(
+    @{ Problem = 'contradictory name'; Response = 'inventory'; CustomMetadata = $false },
+    @{ Problem = 'contradictory type'; Response = 'inventory'; CustomMetadata = $false },
+    @{ Problem = 'wrong full ID'; Response = 'inventory'; CustomMetadata = $false },
+    @{ Problem = 'missing required GUID'; Response = 'inventory'; CustomMetadata = $false },
+    @{ Problem = 'replacement GUID'; Response = 'inventory'; CustomMetadata = $false },
+    @{ Problem = 'contradictory name'; Response = 'exact readback'; CustomMetadata = $false },
+    @{ Problem = 'contradictory type'; Response = 'exact readback'; CustomMetadata = $false },
+    @{ Problem = 'wrong full ID'; Response = 'exact readback'; CustomMetadata = $false },
+    @{ Problem = 'missing required GUID'; Response = 'exact readback'; CustomMetadata = $false },
+    @{ Problem = 'replacement GUID'; Response = 'exact readback'; CustomMetadata = $false },
+    @{ Problem = 'contradictory name'; Response = 'custom-tag inventory'; CustomMetadata = $true },
+    @{ Problem = 'contradictory type'; Response = 'custom-tag inventory'; CustomMetadata = $true },
+    @{ Problem = 'wrong full ID'; Response = 'custom-tag inventory'; CustomMetadata = $true },
+    @{ Problem = 'missing required GUID'; Response = 'custom-tag inventory'; CustomMetadata = $true },
+    @{ Problem = 'replacement GUID'; Response = 'custom-tag inventory'; CustomMetadata = $true }
+  ) {
+    Set-UpgradeRawJobSchedule
+    if ($CustomMetadata) { Set-UpgradeCustomMetadata }
+    $fixture = $global:upgradeFixture
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $job = if ($Response -eq 'exact readback') { $fixture.ReadbackJob } else { $fixture.Job }
+    $replacementId = '44444444-4444-4444-8444-444444444444'
+    switch ($Problem) {
+      'contradictory name' { $job | Add-Member -NotePropertyName name -NotePropertyValue $replacementId }
+      'contradictory type' { $job | Add-Member -NotePropertyName type -NotePropertyValue 'Microsoft.Automation/automationAccounts/schedules' }
+      'wrong full ID' { $job.id = $job.id.Replace('/automationAccounts/', '/wrongChildType/') }
+      'missing required GUID' { $job.properties.PSObject.Properties.Remove('jobScheduleId') }
+      'replacement GUID' {
+        $job.id = "$($fixture.Account.id)/jobSchedules/$replacementId"
+        $job.properties.jobScheduleId = $replacementId
+      }
+    }
+    $beforeJob = $fixture.Job | ConvertTo-Json -Depth 30 -Compress
+    $beforeReadback = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+
+    $failure = $null
+    try { Invoke-UpgradeSetup } catch { $failure = $_ }
+    $failure | Should -Not -BeNullOrEmpty
+    $failure.Exception.Message | Should -Match 'jobSchedule|association'
+    ($fixture.Calls -join '|') | Should -Match '/jobSchedules\?api-version='
+    if ($Response -eq 'exact readback') {
+      $fixture.Calls | Should -Contain "GET https://management.azure.com$($fixture.Job.id)?api-version=2023-11-01"
+    }
+
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.Job | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeJob
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeReadback
+    ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+    $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
+    Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
+    Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
+  }
+
+  It 'still requires <Resource> <Field> metadata when only jobSchedule labels are optional' -ForEach @(
+    @{ Resource = 'Schedule'; Field = 'name' }, @{ Resource = 'Schedule'; Field = 'type' },
+    @{ Resource = 'Runbook'; Field = 'name' }, @{ Resource = 'Runbook'; Field = 'type' }
+  ) {
+    Set-UpgradeRawJobSchedule
+    $fixture = $global:upgradeFixture
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $fixture[$Resource].PSObject.Properties.Remove($Field)
+    $failure = $null
+    try { Invoke-UpgradeSetup } catch { $failure = $_ }
+    $failure | Should -Not -BeNullOrEmpty
+    $failure.Exception.Message | Should -Match "identity|$Field"
+    ($fixture.Calls -join '|') | Should -Match '/jobSchedules\?api-version='
+    ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    $fixture.GraphGrantCalls | Should -Be 0
   }
 
   It 'fails closed on runtime-only published/local hash mismatch without any writes or grants' {

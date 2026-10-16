@@ -829,11 +829,7 @@ if (-not $existingAutomationResources) {
   Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders -Body $jobScheduleBody -ContentType 'application/json' | Out-Null
 }
 $verifiedSchedule = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders
-if ([string]$verifiedSchedule.id -ine "$expectedAutomationAccountId/jobSchedules/$jobScheduleId" -or
-    [string]$verifiedSchedule.name -ine $jobScheduleId -or
-    [string]$verifiedSchedule.type -ine 'Microsoft.Automation/automationAccounts/jobSchedules') {
-  throw 'The Automation association readback does not match its exact ID, name, and type.'
-}
+Assert-MaesterJobScheduleIdentity -ExpectedAccountId $expectedAutomationAccountId -ExpectedJobScheduleId $jobScheduleId -JobSchedule $verifiedSchedule
 Assert-MaesterOwnershipReceiptTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
   -ExpectedJobScheduleId $jobScheduleId -Account $liveAccount -JobSchedule $verifiedSchedule
 if ($existingAutomationResources -and

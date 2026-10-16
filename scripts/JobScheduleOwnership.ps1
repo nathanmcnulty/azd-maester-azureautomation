@@ -4,6 +4,29 @@ function Test-MaesterGuid {
   return [guid]::TryParse($Value, [ref]$parsed)
 }
 
+function Assert-MaesterJobScheduleIdentity {
+  param(
+    [Parameter(Mandatory)][string]$ExpectedAccountId,
+    [Parameter(Mandatory)][string]$ExpectedJobScheduleId,
+    [Parameter(Mandatory)]$JobSchedule
+  )
+  # Azure's GET/list examples omit name/type. The full ID and required GUID
+  # establish identity; optional labels must agree if the service supplies them.
+  $record = [pscustomobject]$JobSchedule
+  $message = 'The Automation association readback does not match its exact ID, selected GUID, and any supplied name/type.'
+  if (-not (Test-MaesterGuid -Value $ExpectedJobScheduleId) -or
+      -not $record.PSObject.Properties['id'] -or $record.id -isnot [string] -or
+      $record.id -ine "$ExpectedAccountId/jobSchedules/$ExpectedJobScheduleId" -or
+      -not $record.PSObject.Properties['properties'] -or $null -eq $record.properties) { throw $message }
+  $properties = [pscustomobject]$record.properties
+  if (-not $properties.PSObject.Properties['jobScheduleId'] -or $properties.jobScheduleId -isnot [string] -or
+      $properties.jobScheduleId -ine $ExpectedJobScheduleId -or
+      ($record.PSObject.Properties['name'] -and ($record.name -isnot [string] -or $record.name -ine $ExpectedJobScheduleId)) -or
+      ($record.PSObject.Properties['type'] -and ($record.type -isnot [string] -or $record.type -ine 'Microsoft.Automation/automationAccounts/jobSchedules'))) {
+    throw $message
+  }
+}
+
 function Assert-MaesterOwnershipReceiptTarget {
   param(
     [Parameter(Mandatory = $true)][string]$ExpectedAccountId,
@@ -12,12 +35,10 @@ function Assert-MaesterOwnershipReceiptTarget {
     [Parameter(Mandatory = $true)]$Account,
     [Parameter(Mandatory = $true)]$JobSchedule
   )
-  $liveJobScheduleId = [string]$JobSchedule.properties.jobScheduleId
-  if ([string]::IsNullOrWhiteSpace($liveJobScheduleId)) { $liveJobScheduleId = [string]$JobSchedule.name }
+  Assert-MaesterJobScheduleIdentity -ExpectedAccountId $ExpectedAccountId -ExpectedJobScheduleId $ExpectedJobScheduleId -JobSchedule $JobSchedule
   if (-not (Test-MaesterGuid -Value $ExpectedJobScheduleId) -or
       [string]$Account.id -ine $ExpectedAccountId -or
       [string]$Account.identity.principalId -ine $ExpectedPrincipalId -or
-      $liveJobScheduleId -ine $ExpectedJobScheduleId -or
       [string]$JobSchedule.properties.schedule.name -ine 'maester-weekly-sunday' -or
       [string]$JobSchedule.properties.runbook.name -ine 'maester-runbook') {
     throw 'Provisioned Automation account or jobSchedule does not match the template ownership receipt.'
@@ -81,14 +102,17 @@ function Resolve-MaesterJobScheduleOwnership {
   $owned = @()
   foreach ($jobSchedule in @($JobSchedules)) {
     if ($null -eq $jobSchedule) { continue }
+    $record = [pscustomobject]$jobSchedule
     $id = [string]$jobSchedule.properties.jobScheduleId
-    $nameId = [string]$jobSchedule.name
-    if ([string]::IsNullOrWhiteSpace($id)) { $id = $nameId }
-    if (-not [string]::IsNullOrWhiteSpace($nameId) -and $nameId -ine $id) {
+    $nameId = if ($record.PSObject.Properties['name']) { [string]$record.name } else { '' }
+    if ($record.PSObject.Properties['name'] -and $nameId -ine $id) {
       throw 'A live jobSchedule has inconsistent name and jobScheduleId values.'
     }
     if (-not (Test-MaesterGuid -Value $id)) {
       throw 'A live jobSchedule has no valid GUID. Refusing to change an ambiguous account.'
+    }
+    if ($id -ieq $selectedId) {
+      Assert-MaesterJobScheduleIdentity -ExpectedAccountId $ExpectedAccountId -ExpectedJobScheduleId $selectedId -JobSchedule $jobSchedule
     }
     $scheduleName = [string]$jobSchedule.properties.schedule.name
     $runbookName = [string]$jobSchedule.properties.runbook.name
@@ -161,11 +185,14 @@ function Assert-MaesterJobScheduleWriteTarget {
   $matchingTemplateIds = @()
   foreach ($item in @($JobSchedules)) {
     if ($null -eq $item) { throw 'Automation jobSchedule inventory contains an empty record.' }
+    $record = [pscustomobject]$item
     $id = [string]$item.properties.jobScheduleId
-    if ([string]::IsNullOrWhiteSpace($id)) { $id = [string]$item.name }
     if (-not (Test-MaesterGuid -Value $id) -or
-        (-not [string]::IsNullOrWhiteSpace([string]$item.name) -and [string]$item.name -ine $id)) {
+        ($record.PSObject.Properties['name'] -and [string]$record.name -ine $id)) {
       throw 'Automation jobSchedule inventory contains an ambiguous ID.'
+    }
+    if ($id -ieq $JobScheduleId) {
+      Assert-MaesterJobScheduleIdentity -ExpectedAccountId $ExpectedAccountId -ExpectedJobScheduleId $JobScheduleId -JobSchedule $item
     }
     $isTemplate = [string]$item.properties.schedule.name -ieq 'maester-weekly-sunday' -and
       [string]$item.properties.runbook.name -ieq 'maester-runbook'
@@ -234,8 +261,19 @@ function Assert-MaesterExistingAutomationResources {
       @{ Kind = 'Runbook'; Segment = 'runbooks'; Name = 'maester-runbook'; Items = @($Runbooks) }
     )) {
     $expectedId = "$ExpectedAccountId/$($spec.Segment)/$($spec.Name)"
-    $items = @($spec.Items | Where-Object { [string]$_.name -ieq $spec.Name -or [string]$_.id -ieq $expectedId })
-    if ($items.Count -ne 1 -or [string]$items[0].id -ine $expectedId -or
+    $items = @($spec.Items | Where-Object {
+      $record = [pscustomobject]$_
+      ($record.PSObject.Properties['name'] -and [string]$record.name -ieq $spec.Name) -or
+      [string]$_.id -ieq $expectedId -or
+      ($spec.Kind -eq 'JobSchedule' -and [string]$_.properties.jobScheduleId -ieq $spec.Name)
+    })
+    if ($items.Count -ne 1) {
+      throw "The verified existing Automation $($spec.Kind) disappeared, changed identity, or is ambiguous."
+    }
+    if ($spec.Kind -eq 'JobSchedule') {
+      Assert-MaesterJobScheduleIdentity -ExpectedAccountId $ExpectedAccountId -ExpectedJobScheduleId $spec.Name -JobSchedule $items[0]
+    }
+    elseif ([string]$items[0].id -ine $expectedId -or
         [string]$items[0].name -ine $spec.Name -or
         [string]$items[0].type -ine "Microsoft.Automation/automationAccounts/$($spec.Segment)") {
       throw "The verified existing Automation $($spec.Kind) disappeared, changed identity, or is ambiguous."

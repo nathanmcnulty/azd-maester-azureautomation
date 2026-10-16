@@ -490,3 +490,63 @@ Describe 'Fresh existing runbook metadata capture' {
     $snapshot.properties.logProgress | Should -BeTrue
   }
 }
+
+Describe 'Service-shaped association preprovision identity' {
+  BeforeEach {
+    $script:serviceScenario = New-OfflineScenario
+    $script:serviceScenario.Values.AUTOMATION_OWNED_ACCOUNT_ID = $script:accountId
+    $script:serviceScenario.Values.AUTOMATION_OWNED_PRINCIPAL_ID = $script:principalId
+    $script:serviceScenario.Values.AUTOMATION_OWNED_JOB_SCHEDULE_ID = $script:scheduleId
+    # Keep the raw service shape: full id and properties, no synthesized labels.
+    $script:serviceJob = @{
+      id = "$script:accountId/jobSchedules/$script:scheduleId"
+      properties = @{ jobScheduleId = $script:scheduleId; schedule = @{ name = 'maester-weekly-sunday' }; runbook = @{ name = 'maester-runbook' }; parameters = @{ Custom = 'keep'; IncludeAzure = 'false' }; runOn = 'existing-worker' }
+    } | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+    $script:serviceScenario.ScheduleList.value = @($script:serviceJob, $script:unrelated)
+  }
+
+  It 'accepts raw omitted labels with <Label> without changing the selected GUID or response' -ForEach @(
+    @{ Label = 'no type'; IncludeType = $false }, @{ Label = 'mixed-case service type'; IncludeType = $true }
+  ) {
+    if ($IncludeType) { $script:serviceJob | Add-Member -NotePropertyName type -NotePropertyValue 'Microsoft.Automation/AutomationAccounts/JobSchedules' }
+    $before = $script:serviceJob | ConvertTo-Json -Depth 10 -Compress
+    Invoke-OfflinePreProvision -Scenario $script:serviceScenario
+    $global:maesterOfflineWrites.AUTOMATION_JOB_SCHEDULE_ID | Should -BeExactly $script:scheduleId
+    $global:maesterOfflineWrites.AUTOMATION_EXISTING_RESOURCES | Should -BeExactly 'true'
+    ($script:serviceJob | ConvertTo-Json -Depth 10 -Compress) | Should -BeExactly $before
+    @($global:maesterOfflineWrites.Keys | Where-Object { $_ -like 'AUTOMATION_OWNED_*' -or $_ -like 'AUTOMATION_ADOPT_*' }).Count | Should -Be 0
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match '--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'rejects <Label> before changing any environment value' -ForEach @(
+    @{ Label = 'conflicting supplied name'; Field = 'name'; Value = '33333333-3333-3333-3333-333333333333' },
+    @{ Label = 'conflicting supplied type'; Field = 'type'; Value = 'Microsoft.Automation/automationAccounts/schedules' },
+    @{ Label = 'wrong full resource parent'; Field = 'id'; Value = '/subscriptions/sub-test/resourceGroups/rg-other/providers/Microsoft.Automation/automationAccounts/aa-other/jobSchedules/22222222-2222-2222-2222-222222222222' },
+    @{ Label = 'conflicting required GUID'; Field = 'jobScheduleId'; Value = '33333333-3333-3333-3333-333333333333' },
+    @{ Label = 'missing required GUID'; Field = 'jobScheduleId'; Value = $null }
+  ) {
+    if ($Field -eq 'jobScheduleId') {
+      if ($null -eq $Value) { $script:serviceJob.properties.PSObject.Properties.Remove('jobScheduleId') }
+      else { $script:serviceJob.properties.jobScheduleId = $Value }
+    }
+    elseif ($Field -eq 'id') { $script:serviceJob.id = $Value }
+    else { $script:serviceJob | Add-Member -NotePropertyName $Field -NotePropertyValue $Value }
+    { Invoke-OfflinePreProvision -Scenario $script:serviceScenario } | Should -Throw
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'rejects duplicate raw associations before changing any environment value' {
+    $script:serviceScenario.ScheduleList.value = @($script:serviceJob, $script:serviceJob)
+    { Invoke-OfflinePreProvision -Scenario $script:serviceScenario } | Should -Throw '*More than one live template jobSchedule*'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+
+  It 'does not adopt a replacement GUID merely because schedule and runbook linkage match' {
+    $replacement = '44444444-4444-4444-4444-444444444444'
+    $script:serviceJob.id = "$script:accountId/jobSchedules/$replacement"
+    $script:serviceJob.properties.jobScheduleId = $replacement
+    { Invoke-OfflinePreProvision -Scenario $script:serviceScenario } | Should -Throw '*differs from the saved receipt*'
+    $script:serviceScenario.Values.AUTOMATION_OWNED_JOB_SCHEDULE_ID | Should -BeExactly $script:scheduleId
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+}
