@@ -84,6 +84,16 @@ param deploymentTimestamp string = utcNow()
 @description('Stable GUID for the Automation Account jobSchedule. Managed by preprovision to avoid Azure Automation ghost-state conflicts after resource group deletion.')
 param jobScheduleId string = newGuid()
 
+@description('Live-verified existing schedule, runbook and association. Set only by preprovision after ownership checks.')
+@allowed(['true', 'false'])
+param existingAutomationResourcesOption string = 'false'
+
+@description('Bounded existing-deployment runtime-only upgrade. Leaves non-runtime infrastructure and all access settings untouched.')
+@allowed(['true', 'false'])
+param preserveUpgradeAccessOption string = 'false'
+
+var existingAutomationResources = existingAutomationResourcesOption == 'true'
+var preserveUpgradeAccess = preserveUpgradeAccessOption == 'true'
 // Standardized parameters and tags for consistency with function-app and container-app-job
 var automationAccountName = 'aa-${toLower(environmentName)}'
 var scheduleName = 'maester-weekly-sunday'
@@ -105,7 +115,19 @@ var defaultTags = {
 }
 var resourceTags = union(defaultTags, customTags)
 
-resource automationAccount 'Microsoft.Automation/automationAccounts@2024-10-23' = {
+resource automationTarget 'Microsoft.Automation/automationAccounts@2024-10-23' existing = {
+  name: automationAccountName
+}
+
+resource storageTarget 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: storageAccountName
+}
+
+resource existingWebApp 'Microsoft.Web/sites@2023-12-01' existing = {
+  name: webAppName
+}
+
+resource automationAccount 'Microsoft.Automation/automationAccounts@2024-10-23' = if (!preserveUpgradeAccess) {
   name: automationAccountName
   location: location
   tags: resourceTags
@@ -128,7 +150,7 @@ resource automationAccount 'Microsoft.Automation/automationAccounts@2024-10-23' 
   }
 }
 
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!preserveUpgradeAccess) {
   name: storageAccountName
   location: location
   tags: resourceTags
@@ -149,7 +171,8 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   ]
 }
 
-module maesterWebApp './vendor/Azd.MaesterReportWebApp/maester-report-webapp.bicep' = if (includeWebApp) {
+module maesterWebApp './vendor/Azd.MaesterReportWebApp/maester-report-webapp.bicep' = if (includeWebApp && !preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'maester-report-webapp'
   params: {
     location: location
@@ -162,12 +185,12 @@ module maesterWebApp './vendor/Azd.MaesterReportWebApp/maester-report-webapp.bic
     customTags: resourceTags
     enableResourceLocks: enableResourceLocks
     systemAssignedIdentity: true
-    publisherPrincipalId: automationAccount.identity.principalId
-    publisherResourceId: automationAccount.id
+    publisherPrincipalId: automationTarget.identity.principalId
+    publisherResourceId: automationTarget.id
   }
 }
 
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = if (!preserveUpgradeAccess) {
   name: 'default'
   parent: storageAccount
   properties: {
@@ -180,7 +203,7 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
   }
 }
 
-resource containerArchive 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+resource containerArchive 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (!preserveUpgradeAccess) {
   name: 'archive'
   parent: blobService
   properties: {
@@ -188,7 +211,7 @@ resource containerArchive 'Microsoft.Storage/storageAccounts/blobServices/contai
   }
 }
 
-resource containerLatest 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+resource containerLatest 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (!preserveUpgradeAccess) {
   name: 'latest'
   parent: blobService
   properties: {
@@ -196,7 +219,7 @@ resource containerLatest 'Microsoft.Storage/storageAccounts/blobServices/contain
   }
 }
 
-resource storageManagementPolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
+resource storageManagementPolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (!preserveUpgradeAccess) {
   name: 'default'
   parent: storageAccount
   properties: {
@@ -232,17 +255,18 @@ resource storageManagementPolicy 'Microsoft.Storage/storageAccounts/managementPo
   }
 }
 
-resource automationStorageBlobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, automationAccount.id, 'StorageBlobDataContributor')
+resource automationStorageBlobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
+  name: guid(storageAccount.id, automationTarget.id, 'StorageBlobDataContributor')
   scope: storageAccount
   properties: {
     roleDefinitionId: storageBlobDataContributorRoleId
-    principalId: automationAccount.identity.principalId
+    principalId: automationTarget.identity.principalId
     principalType: 'ServicePrincipal'
   }
 }
 
-resource storageDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (enableResourceLocks) {
+resource storageDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (enableResourceLocks && !preserveUpgradeAccess) {
   name: 'lock-cannot-delete-storage'
   scope: storageAccount
   properties: {
@@ -251,7 +275,7 @@ resource storageDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (enab
   }
 }
 
-resource automationDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (enableResourceLocks) {
+resource automationDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (enableResourceLocks && !preserveUpgradeAccess) {
   name: 'lock-cannot-delete-automation'
   scope: automationAccount
   properties: {
@@ -261,8 +285,9 @@ resource automationDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (e
 }
 
 resource runtime74 'Microsoft.Automation/automationAccounts/runtimeEnvironments@2024-10-23' = {
+  dependsOn: [automationAccount]
   name: runtimeEnvironmentName
-  parent: automationAccount
+  parent: automationTarget
   location: location
   properties: {
     runtime: {
@@ -373,12 +398,15 @@ resource runtimePackageMicrosoftTeams 'Microsoft.Automation/automationAccounts/r
   }
 }
 
-resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' = {
+// Existing runbooks are rebound with a runtime-only PATCH after ownership checks.
+// A create-or-update PUT can reset omitted metadata or replace published content.
+resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' = if (!existingAutomationResources && !preserveUpgradeAccess) {
   name: runbookName
-  parent: automationAccount
+  parent: automationTarget
   location: location
   properties: {
     runbookType: 'PowerShell'
+    runtimeEnvironment: runtime74.name
     logProgress: true
     logVerbose: false
     description: 'Runbook to execute Maester report workflow'
@@ -386,7 +414,6 @@ resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' =
       uri: 'https://raw.githubusercontent.com/maester365/maester/c657a4b8a24267ccd795edb0c7db402e0d440e3b/powershell/public/Invoke-Maester.ps1'
       contentHash: { algorithm: 'sha256', value: 'FF70CB4AB2F32ADA6C5FF5121931D3C8BE45BDBCDB746970C26FB275FFAD312F' }
     }
-    runtimeEnvironment: runtime74.name
   }
   dependsOn: [
     runtimePackageAzAccounts
@@ -401,9 +428,10 @@ resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' =
   ]
 }
 
-resource variableStorageAccountName 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+resource variableStorageAccountName 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'StorageAccountName'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Storage account name for persisted Maester outputs'
     isEncrypted: false
@@ -411,9 +439,10 @@ resource variableStorageAccountName 'Microsoft.Automation/automationAccounts/var
   }
 }
 
-resource variableMailRecipient 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+resource variableMailRecipient 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'MailRecipient'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Optional recipient for Maester email notifications'
     isEncrypted: false
@@ -421,9 +450,10 @@ resource variableMailRecipient 'Microsoft.Automation/automationAccounts/variable
   }
 }
 
-resource variableIncludeExchange 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+resource variableIncludeExchange 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'IncludeExchange'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Whether the runbook should attempt to connect to Exchange Online'
     isEncrypted: false
@@ -431,9 +461,10 @@ resource variableIncludeExchange 'Microsoft.Automation/automationAccounts/variab
   }
 }
 
-resource variableIncludeTeams 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+resource variableIncludeTeams 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'IncludeTeams'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Whether the runbook should attempt to connect to Microsoft Teams'
     isEncrypted: false
@@ -441,9 +472,10 @@ resource variableIncludeTeams 'Microsoft.Automation/automationAccounts/variables
   }
 }
 
-resource variableIncludeAzure 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+resource variableIncludeAzure 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'IncludeAzure'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Whether setup should grant Azure RBAC at the requested scopes'
     isEncrypted: false
@@ -451,9 +483,10 @@ resource variableIncludeAzure 'Microsoft.Automation/automationAccounts/variables
   }
 }
 
-resource variableAzureRbacScopes 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+resource variableAzureRbacScopes 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (!preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'AzureRbacScopes'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'JSON array string of Azure RBAC scopes requested for the managed identity'
     isEncrypted: false
@@ -461,9 +494,10 @@ resource variableAzureRbacScopes 'Microsoft.Automation/automationAccounts/variab
   }
 }
 
-resource variableWebAppName 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (includeWebApp) {
+resource variableWebAppName 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (includeWebApp && !preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'WebAppName'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Optional Web App name for publishing latest Maester dashboard as default content'
     isEncrypted: false
@@ -471,9 +505,10 @@ resource variableWebAppName 'Microsoft.Automation/automationAccounts/variables@2
   }
 }
 
-resource variableWebAppResourceGroupName 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (includeWebApp) {
+resource variableWebAppResourceGroupName 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = if (includeWebApp && !preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: 'WebAppResourceGroupName'
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     description: 'Resource group for optional Web App hosting latest Maester dashboard'
     isEncrypted: false
@@ -481,9 +516,10 @@ resource variableWebAppResourceGroupName 'Microsoft.Automation/automationAccount
   }
 }
 
-resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01' = {
+resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01' = if (!existingAutomationResources && !preserveUpgradeAccess) {
+  dependsOn: [automationAccount]
   name: scheduleName
-  parent: automationAccount
+  parent: automationTarget
   properties: {
     startTime: dateTimeAdd(deploymentTimestamp, 'P7D')
     expiryTime: '2099-12-31T23:59:00Z'
@@ -498,12 +534,14 @@ resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01'
   }
 }
 
-output automationAccountName string = automationAccount.name
+output automationRuntimeEnvironmentName string = runtime74.name
+output automationRuntimeEnvironmentVersion string = runtime74.properties.runtime.version
+output automationAccountName string = automationTarget.name
 output jobScheduleId string = jobScheduleId
-output automationPrincipalId string = automationAccount.identity.principalId
-output storageAccountName string = storageAccount.name
-output webAppName string = includeWebApp ? maesterWebApp!.outputs.webAppName : ''
-output STORAGE_ACCOUNT_NAME string = storageAccount.name
-output WEB_APP_NAME string = includeWebApp ? maesterWebApp!.outputs.webAppName : ''
+output automationPrincipalId string = preserveUpgradeAccess ? automationTarget.identity.principalId : automationAccount!.identity.principalId
+output storageAccountName string = storageTarget.name
+output webAppName string = includeWebApp ? webAppName : ''
+output STORAGE_ACCOUNT_NAME string = storageTarget.name
+output WEB_APP_NAME string = includeWebApp ? webAppName : ''
 output WEB_APP_ENABLED string = includeWebApp ? 'true' : 'false'
-output webAppDefaultHostName string = includeWebApp ? maesterWebApp!.outputs.webAppDefaultHostName : ''
+output webAppDefaultHostName string = includeWebApp ? (preserveUpgradeAccess ? existingWebApp.properties.defaultHostName : maesterWebApp!.outputs.webAppDefaultHostName) : ''
