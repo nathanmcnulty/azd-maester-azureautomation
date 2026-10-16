@@ -53,6 +53,12 @@ function Resolve-MaesterJobScheduleOwnership {
     throw 'The live Automation account identity does not match the expected deployment target.'
   }
 
+  $adoptParts = @(@($AdoptAccountId, $AdoptPrincipalId, $AdoptJobScheduleId) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+  if ($adoptParts.Count -gt 0 -and $adoptParts.Count -lt 3) { throw 'The explicit Automation adoption request is incomplete.' }
+  if ($adoptParts.Count -eq 3 -and -not [string]::IsNullOrWhiteSpace($ReceiptAccountId) -and
+      ($AdoptAccountId -ine $ReceiptAccountId -or $AdoptPrincipalId -ine $ReceiptPrincipalId -or $AdoptJobScheduleId -ine $ReceiptJobScheduleId)) {
+    throw 'The explicit Automation adoption request conflicts with the ownership receipt.'
+  }
   $hasReceipt = -not [string]::IsNullOrWhiteSpace($ReceiptAccountId)
   $receiptParts = @(@($ReceiptAccountId, $ReceiptPrincipalId, $ReceiptJobScheduleId) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
   if ($receiptParts.Count -gt 0 -and $receiptParts.Count -lt 3) {
@@ -107,6 +113,9 @@ function Resolve-MaesterJobScheduleOwnership {
   if (-not [string]::IsNullOrWhiteSpace($selectedId) -and -not (Test-MaesterGuid -Value $selectedId)) {
     throw 'The adopted jobSchedule ID must be a GUID.'
   }
+  if ($owned.Count -eq 0 -and $hasReceipt) {
+    throw 'The receipt-bound Automation jobSchedule disappeared; reconcile the exact target before redeployment.'
+  }
   if ($owned.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($AdoptJobScheduleId) -and -not $hasReceipt) {
     throw 'The explicit adoption jobSchedule ID was not found in the live account.'
   }
@@ -144,7 +153,7 @@ function Assert-MaesterJobScheduleWriteTarget {
     throw 'The saved Automation ownership receipt differs from the selected jobSchedule.'
   }
   $adoptParts = @(@($AdoptAccountId, $AdoptPrincipalId, $AdoptJobScheduleId) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-  if ($receiptParts.Count -eq 0 -and $adoptParts.Count -gt 0 -and
+  if ($adoptParts.Count -gt 0 -and
       ($adoptParts.Count -ne 3 -or $AdoptAccountId -ine $ExpectedAccountId -or
        $AdoptPrincipalId -ine $ExpectedPrincipalId -or $AdoptJobScheduleId -ine $JobScheduleId)) {
     throw 'The explicit Automation adoption target differs from the selected jobSchedule.'
@@ -172,7 +181,74 @@ function Assert-MaesterJobScheduleWriteTarget {
       ($matchingTemplateIds.Count -eq 1 -and $matchingTemplateIds[0] -ine $JobScheduleId)) {
     throw 'The template jobSchedule association is ambiguous or differs from the selected ID.'
   }
+  if ($matchingTemplateIds.Count -eq 0 -and ($receiptParts.Count -gt 0 -or $adoptParts.Count -gt 0)) {
+    throw 'The receipt-bound or adopted Automation jobSchedule disappeared; explicit reconciliation is required.'
+  }
   if ($matchingTemplateIds.Count -eq 1 -and $receiptParts.Count -eq 0 -and $adoptParts.Count -eq 0) {
     throw 'An existing template jobSchedule requires an ownership receipt or explicit adoption.'
   }
+}
+
+
+function Get-MaesterUpgradeBoolean {
+  [CmdletBinding()]
+  param([AllowEmptyString()][string]$Value, [Parameter(Mandatory)][string]$Name, [bool]$Default = $false)
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $Default }
+  if ($Value -in @('true', 'false')) { return $Value -ieq 'true' }
+  throw "$Name must be true or false."
+}
+
+function Assert-MaesterCompleteInventory {
+  [CmdletBinding()]
+  param([AllowNull()]$Response, [Parameter(Mandatory)][string]$Name)
+  if ($null -eq $Response -or -not $Response.PSObject.Properties['value'] -or
+      $null -eq $Response.value -or $Response.value -isnot [System.Collections.IList] -or
+      ($Response.PSObject.Properties['nextLink'] -and $Response.nextLink) -or
+      @($Response.value | Where-Object { $null -eq $_ }).Count -gt 0) {
+    throw "Automation $Name inventory was incomplete."
+  }
+}
+
+function Assert-MaesterExistingAutomationResources {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][AllowEmptyString()][string]$ExpectedAccountId,
+    [AllowNull()]$Account,
+    [AllowNull()][object[]]$JobSchedules = @(),
+    [AllowNull()][object[]]$Schedules = @(),
+    [AllowNull()][object[]]$Runbooks = @(),
+    [Parameter(Mandatory)]$Ownership,
+    [switch]$RequireExisting
+  )
+  if ([string]::IsNullOrWhiteSpace([string]$Ownership.OwnedJobScheduleId)) {
+    if ($RequireExisting) { throw 'Upgrade preservation requires a verified existing Automation ownership binding.' }
+    return [pscustomobject]@{ Existing = $false; JobSchedule = $null; Schedule = $null; Runbook = $null }
+  }
+  if ($null -eq $Account -or [string]$Account.id -ine $ExpectedAccountId) {
+    throw 'The existing Automation account disappeared or changed before preservation verification.'
+  }
+  $selected = @{}
+  foreach ($spec in @(
+      @{ Kind = 'JobSchedule'; Segment = 'jobSchedules'; Name = [string]$Ownership.OwnedJobScheduleId; Items = @($JobSchedules) },
+      @{ Kind = 'Schedule'; Segment = 'schedules'; Name = 'maester-weekly-sunday'; Items = @($Schedules) },
+      @{ Kind = 'Runbook'; Segment = 'runbooks'; Name = 'maester-runbook'; Items = @($Runbooks) }
+    )) {
+    $expectedId = "$ExpectedAccountId/$($spec.Segment)/$($spec.Name)"
+    $items = @($spec.Items | Where-Object { [string]$_.name -ieq $spec.Name -or [string]$_.id -ieq $expectedId })
+    if ($items.Count -ne 1 -or [string]$items[0].id -ine $expectedId -or
+        [string]$items[0].name -ine $spec.Name -or
+        [string]$items[0].type -ine "Microsoft.Automation/automationAccounts/$($spec.Segment)") {
+      throw "The verified existing Automation $($spec.Kind) disappeared, changed identity, or is ambiguous."
+    }
+    $selected[$spec.Kind] = $items[0]
+  }
+  Assert-MaesterOwnershipReceiptTarget -ExpectedAccountId $ExpectedAccountId -ExpectedPrincipalId ([string]$Account.identity.principalId) `
+    -ExpectedJobScheduleId ([string]$Ownership.JobScheduleId) -Account $Account -JobSchedule $selected.JobSchedule
+  if ([string]$selected.Runbook.properties.runbookType -ine 'PowerShell') {
+    throw 'The verified existing Automation runbook type is not PowerShell; reconcile it before upgrade.'
+  }
+  if ([string]$selected.Runbook.properties.state -ine 'Published') {
+    throw 'The verified existing Automation runbook is not published; reconcile it before upgrade.'
+  }
+  return [pscustomobject]@{ Existing = $true; JobSchedule = $selected.JobSchedule; Schedule = $selected.Schedule; Runbook = $selected.Runbook }
 }

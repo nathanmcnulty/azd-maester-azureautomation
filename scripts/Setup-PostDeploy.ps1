@@ -154,266 +154,380 @@ $automationAccountName = [string]$automationAccount.name
 $expectedAutomationAccountId = [string]$automationAccount.id
 $principalId = [string]$automationAccount.identity.principalId
 
-# ──────────────────────────────────────────────
-# Storage Blob Data Reader for signed-in user
-# ──────────────────────────────────────────────
-
-$storageBlobDataReaderRoleId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/2a2b9908-6ea1-4ae2-8e65-a410df84e7d1"
-
-$signedInUser = $null
-try {
-  $signedInUser = Invoke-GraphRestRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/me?$select=id,userPrincipalName,displayName' -TenantId $TenantId
+# Strict, local upgrade controls are separate from the shared setup wizard.
+if ($null -ne $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS -and
+    $deploymentValues.ContainsKey('AUTOMATION_UPGRADE_PRESERVE_ACCESS') -and
+    $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS -ine [string]$deploymentValues['AUTOMATION_UPGRADE_PRESERVE_ACCESS']) {
+  throw 'The process AUTOMATION_UPGRADE_PRESERVE_ACCESS differs from the selected azd environment.'
 }
-catch {
-  Write-Warning ("Could not resolve signed-in user from Azure CLI for Storage Blob Data Reader assignment. Error: {0}" -f $_.Exception.Message)
+$preserveAccessValue = if ($deploymentValues.ContainsKey('AUTOMATION_UPGRADE_PRESERVE_ACCESS')) {
+  [string]$deploymentValues['AUTOMATION_UPGRADE_PRESERVE_ACCESS']
+} elseif ($null -ne $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS) {
+  $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS
+} else { 'false' }
+if ($preserveAccessValue -notin @('true', 'false')) {
+  throw 'AUTOMATION_UPGRADE_PRESERVE_ACCESS must be true or false.'
+}
+$preserveExistingAccess = $preserveAccessValue -eq 'true'
+if ($null -ne $env:AUTOMATION_EXISTING_RESOURCES -and
+    $deploymentValues.ContainsKey('AUTOMATION_EXISTING_RESOURCES') -and
+    $env:AUTOMATION_EXISTING_RESOURCES -ine [string]$deploymentValues['AUTOMATION_EXISTING_RESOURCES']) {
+  throw 'The process AUTOMATION_EXISTING_RESOURCES differs from the selected azd environment.'
+}
+$existingResourcesValue = if ($deploymentValues.ContainsKey('AUTOMATION_EXISTING_RESOURCES')) {
+  [string]$deploymentValues['AUTOMATION_EXISTING_RESOURCES']
+} elseif ($null -ne $env:AUTOMATION_EXISTING_RESOURCES) {
+  $env:AUTOMATION_EXISTING_RESOURCES
+} else { $null }
+if ($null -ne $existingResourcesValue -and $existingResourcesValue -notin @('true', 'false')) {
+  throw 'AUTOMATION_EXISTING_RESOURCES must be true or false.'
 }
 
-if ($signedInUser -and $signedInUser.id) {
-  $existingReaderAssignmentsPath = "$($storageAccount.id)/providers/Microsoft.Authorization/roleAssignments?`$filter=atScope()&api-version=2022-04-01"
-  $existingReaderAssignments = (Invoke-RestMethod -Method GET -Uri "https://management.azure.com$existingReaderAssignmentsPath" -Headers $armHeaders).value
-  $existingReaderAssignment = @($existingReaderAssignments | Where-Object {
-      $_.properties.principalId -eq $signedInUser.id -and $_.properties.roleDefinitionId -eq $storageBlobDataReaderRoleId
-    }) | Select-Object -First 1
+$jobScheduleId = [string]$deploymentValues['AUTOMATION_JOB_SCHEDULE_ID']
+if (-not (Test-MaesterGuid -Value $jobScheduleId)) {
+  throw 'AUTOMATION_JOB_SCHEDULE_ID must be a GUID before changing the Automation deployment.'
+}
+$ownershipParameters = @{
+  ReceiptAccountId = [string]$deploymentValues['AUTOMATION_OWNED_ACCOUNT_ID']
+  ReceiptPrincipalId = [string]$deploymentValues['AUTOMATION_OWNED_PRINCIPAL_ID']
+  ReceiptJobScheduleId = [string]$deploymentValues['AUTOMATION_OWNED_JOB_SCHEDULE_ID']
+  AdoptAccountId = [string]$deploymentValues['AUTOMATION_ADOPT_ACCOUNT_ID']
+  AdoptPrincipalId = [string]$deploymentValues['AUTOMATION_ADOPT_PRINCIPAL_ID']
+  AdoptJobScheduleId = [string]$deploymentValues['AUTOMATION_ADOPT_JOB_SCHEDULE_ID']
+}
 
-  $userLabel = if ($signedInUser.userPrincipalName) { $signedInUser.userPrincipalName } else { $signedInUser.id }
-  if (-not $existingReaderAssignment) {
-    $readerAssignmentName = [guid]::NewGuid().ToString()
-    $readerAssignmentPath = "$($storageAccount.id)/providers/Microsoft.Authorization/roleAssignments/${readerAssignmentName}?api-version=2022-04-01"
-    $readerAssignmentBody = @{
-      properties = @{
-        roleDefinitionId = $storageBlobDataReaderRoleId
-        principalId = $signedInUser.id
-        principalType = 'User'
-      }
-    } | ConvertTo-Json -Depth 10 -Compress
+function ConvertTo-MaesterCanonicalJson {
+  param([AllowNull()]$Value)
+  function ConvertTo-CanonicalValue {
+    param([AllowNull()]$Item)
+    if ($null -eq $Item) { return $null }
+    if ($Item -is [System.Collections.IDictionary]) {
+      $ordered = [ordered]@{}
+      foreach ($key in @($Item.Keys | Sort-Object)) { $ordered[$key] = ConvertTo-CanonicalValue $Item[$key] }
+      return $ordered
+    }
+    if ($Item -is [pscustomobject]) {
+      $ordered = [ordered]@{}
+      foreach ($property in @($Item.PSObject.Properties | Sort-Object Name)) { $ordered[$property.Name] = ConvertTo-CanonicalValue $property.Value }
+      return $ordered
+    }
+    if ($Item -is [System.Collections.IList]) {
+      $items = @(foreach ($element in $Item) { ConvertTo-CanonicalValue $element })
+      return ,$items
+    }
+    return $Item
+  }
+  return ConvertTo-Json -InputObject (ConvertTo-CanonicalValue $Value) -Depth 100 -Compress
+}
 
-    Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$readerAssignmentPath" -Headers $armHeaders -Body $readerAssignmentBody -ContentType 'application/json' | Out-Null
-    Write-Host "Granted Storage Blob Data Reader on '$($storageAccount.name)' to signed-in user '$userLabel'."
+function Get-MaesterPostDeployAutomationState {
+  # Never interpret an unreadable, malformed, or truncated inventory as absence.
+  $account = Resolve-MaesterMainDeploymentTarget -EnvironmentValues $deploymentValues `
+    -NameOutput 'automationAccountName' -PrincipalOutput 'automationPrincipalId' `
+    -ProviderType 'Microsoft.Automation/automationAccounts' -ApiVersion '2023-11-01' `
+    -SubscriptionId $SubscriptionId -ResourceGroupName $resolvedResourceGroupName `
+    -EnvironmentName $EnvironmentName -SolutionName 'automation-account' -GetResource {
+      param($path)
+      Invoke-RestMethod -Method GET -Uri "https://management.azure.com$path" -Headers $armHeaders
+    }
+  $inventories = @{}
+  foreach ($childType in @('jobSchedules', 'schedules', 'runbooks')) {
+    $response = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$expectedAutomationAccountId/$childType`?api-version=2023-11-01" -Headers $armHeaders
+    Assert-MaesterCompleteInventory -Response $response -Name $childType
+    $inventories[$childType] = @($response.value)
   }
-  else {
-    Write-Host "Storage Blob Data Reader on '$($storageAccount.name)' is already assigned to '$userLabel'."
+  Assert-MaesterJobScheduleWriteTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
+    -JobScheduleId $jobScheduleId -Account $account -JobSchedules $inventories['jobSchedules'] @ownershipParameters
+  $ownership = [pscustomobject]@{ JobScheduleId = $jobScheduleId; OwnedJobScheduleId = '' }
+  if (@($inventories['jobSchedules'] | Where-Object {
+      [string]$_.properties.schedule.name -ieq 'maester-weekly-sunday' -and
+      [string]$_.properties.runbook.name -ieq 'maester-runbook'
+    }).Count -gt 0) {
+    $ownership = Resolve-MaesterJobScheduleOwnership -ExpectedAccountId $expectedAutomationAccountId `
+      -Account $account -JobSchedules $inventories['jobSchedules'] @ownershipParameters
   }
+  $resources = Assert-MaesterExistingAutomationResources -ExpectedAccountId $expectedAutomationAccountId `
+    -Account $account -JobSchedules $inventories['jobSchedules'] -Schedules $inventories['schedules'] `
+    -Runbooks $inventories['runbooks'] -Ownership $ownership -RequireExisting:$preserveExistingAccess
+  return [pscustomobject]@{ Account = $account; Resources = $resources }
+}
+
+# Complete all exact-target, ownership, and live-child checks before any write.
+$initialAutomationState = Get-MaesterPostDeployAutomationState
+$existingAutomationResources = [bool]$initialAutomationState.Resources.Existing
+$originalAssociationProperties = if ($existingAutomationResources) {
+  ConvertTo-MaesterCanonicalJson $initialAutomationState.Resources.JobSchedule.properties
+} else { $null }
+if ($null -ne $existingResourcesValue -and
+    (($existingResourcesValue -eq 'true') -ne $existingAutomationResources)) {
+  throw 'The live Automation resources differ from the verified preprovision state.'
+}
+if ($preserveExistingAccess) {
+  Write-Host 'Verified existing Automation deployment; preserving all permissions, setup receipts, and Easy Auth settings.'
 }
 else {
-  Write-Warning 'Signed-in user object id was not available. Storage Blob Data Reader assignment for user was skipped.'
-}
+  # ──────────────────────────────────────────────
+  # Storage Blob Data Reader for signed-in user
+  # ──────────────────────────────────────────────
 
-# ──────────────────────────────────────────────
-# Persist verified Automation managed identity principal
-# ──────────────────────────────────────────────
+  $storageBlobDataReaderRoleId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/2a2b9908-6ea1-4ae2-8e65-a410df84e7d1"
 
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_MI_PRINCIPAL_ID' -Value $principalId
-
-# ──────────────────────────────────────────────
-# Grant Graph API permissions
-# ──────────────────────────────────────────────
-
-$mailRecipientForGraph = if ($env:MAIL_RECIPIENT) { $env:MAIL_RECIPIENT.Trim() } else { '' }
-$includeMailSend = -not [string]::IsNullOrWhiteSpace($mailRecipientForGraph)
-
-& (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Grant-MaesterGraphPermissions.ps1') `
-  -TenantId $TenantId `
-  -PrincipalObjectId $principalId `
-  -PermissionProfile $PermissionProfile `
-  -IncludeMailSend $includeMailSend
-
-Write-Host "Automation account '$automationAccountName' managed identity is configured for Maester Graph permissions."
-
-# ──────────────────────────────────────────────
-# Advanced workload setup (Exchange, Teams, Azure)
-# ──────────────────────────────────────────────
-
-$exchangeSetupStatus = if ($IncludeExchange) { 'pending' } else { 'disabled' }
-$teamsSetupStatus = if ($IncludeTeams) { 'pending' } else { 'disabled' }
-$azureSetupStatus = if ($IncludeAzure) { 'pending' } else { 'disabled' }
-
-$exoAppRoleAssignmentIds = @()
-$teamsRoleAssignmentIds = @()
-$azureRoleAssignmentIds = @()
-$exoServicePrincipalDisplayName = $null
-
-if ($IncludeExchange -or $IncludeTeams) {
+  $signedInUser = $null
   try {
-    $scopes = @(
-      'Application.Read.All',
-      'AppRoleAssignment.ReadWrite.All',
-      'Directory.Read.All',
-      'Directory.AccessAsUser.All',
-      'RoleManagement.ReadWrite.Directory'
-    )
-    Connect-MgGraphSilent -TenantId $TenantId -Scopes $scopes
+    $signedInUser = Invoke-GraphRestRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/me?$select=id,userPrincipalName,displayName' -TenantId $TenantId
   }
   catch {
-    $action = Resolve-StepFailureAction -StepName 'Microsoft Graph connection for advanced setup' -Message $_.Exception.Message
-    if ($action -eq 'Stop') {
-      throw
-    }
-    $exchangeSetupStatus = if ($IncludeExchange) { 'skipped' } else { $exchangeSetupStatus }
-    $teamsSetupStatus = if ($IncludeTeams) { 'skipped' } else { $teamsSetupStatus }
+    Write-Warning ("Could not resolve signed-in user from Azure CLI for Storage Blob Data Reader assignment. Error: {0}" -f $_.Exception.Message)
   }
-}
 
-if ($IncludeExchange -and $exchangeSetupStatus -eq 'pending') {
-  $exchangeAppRoleOk = $false
-  $exchangeRbacOk = $false
+  if ($signedInUser -and $signedInUser.id) {
+    $existingReaderAssignmentsPath = "$($storageAccount.id)/providers/Microsoft.Authorization/roleAssignments?`$filter=atScope()&api-version=2022-04-01"
+    $existingReaderAssignments = (Invoke-RestMethod -Method GET -Uri "https://management.azure.com$existingReaderAssignmentsPath" -Headers $armHeaders).value
+    $existingReaderAssignment = @($existingReaderAssignments | Where-Object {
+        $_.properties.principalId -eq $signedInUser.id -and $_.properties.roleDefinitionId -eq $storageBlobDataReaderRoleId
+      }) | Select-Object -First 1
 
-  try {
-    $exchangeResourceAppId = '00000002-0000-0ff1-ce00-000000000000'
-    $exchangeManageAsAppRoleId = [Guid]'dc50a0fb-09a3-484d-be87-e023b12c6440'
+    $userLabel = if ($signedInUser.userPrincipalName) { $signedInUser.userPrincipalName } else { $signedInUser.id }
+    if (-not $existingReaderAssignment) {
+      $readerAssignmentName = [guid]::NewGuid().ToString()
+      $readerAssignmentPath = "$($storageAccount.id)/providers/Microsoft.Authorization/roleAssignments/${readerAssignmentName}?api-version=2022-04-01"
+      $readerAssignmentBody = @{
+        properties = @{
+          roleDefinitionId = $storageBlobDataReaderRoleId
+          principalId = $signedInUser.id
+          principalType = 'User'
+        }
+      } | ConvertTo-Json -Depth 10 -Compress
 
-    $newAssignmentId = Grant-ServicePrincipalAppRoleAssignment -PrincipalObjectId $principalId -ResourceAppId $exchangeResourceAppId -AppRoleId $exchangeManageAsAppRoleId
-    if ($newAssignmentId) {
-      $exoAppRoleAssignmentIds += $newAssignmentId
-      Write-Host 'Assigned Exchange.ManageAsApp to the Automation Account managed identity.'
+      Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$readerAssignmentPath" -Headers $armHeaders -Body $readerAssignmentBody -ContentType 'application/json' | Out-Null
+      Write-Host "Granted Storage Blob Data Reader on '$($storageAccount.name)' to signed-in user '$userLabel'."
     }
     else {
-      Write-Host 'Exchange.ManageAsApp is already assigned to the Automation Account managed identity.'
-    }
-    $exchangeAppRoleOk = $true
-  }
-  catch {
-    $action = Resolve-StepFailureAction -StepName 'Exchange app role assignment (Exchange.ManageAsApp)' -Message $_.Exception.Message
-    if ($action -eq 'Stop') {
-      throw
+      Write-Host "Storage Blob Data Reader on '$($storageAccount.name)' is already assigned to '$userLabel'."
     }
   }
+  else {
+    Write-Warning 'Signed-in user object id was not available. Storage Blob Data Reader assignment for user was skipped.'
+  }
 
-  try {
-    $miSp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/${principalId}?`$select=id,appId,displayName"
-    if (-not $miSp -or -not $miSp.appId) {
-      throw 'Could not resolve managed identity service principal appId for Exchange setup.'
-    }
+  # ──────────────────────────────────────────────
+  # Persist verified Automation managed identity principal
+  # ──────────────────────────────────────────────
 
-    $exoServicePrincipalDisplayName = $miSp.displayName
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_MI_PRINCIPAL_ID' -Value $principalId
 
-    $installMsg = "Exchange Online PowerShell is required to grant the managed identity the Exchange RBAC role 'View-Only Configuration'."
-    if (-not (Test-ModuleAvailable -ModuleName 'ExchangeOnlineManagement' -InstallMessage $installMsg)) {
-      throw 'ExchangeOnlineManagement module is not available. Install it and rerun setup with -IncludeExchange.'
-    }
+  # ──────────────────────────────────────────────
+  # Grant Graph API permissions
+  # ──────────────────────────────────────────────
 
-    # Resolve tenant initial domain for Exchange AccessToken connection
-    $exoOrganization = $null
+  $mailRecipientForGraph = if ($env:MAIL_RECIPIENT) { $env:MAIL_RECIPIENT.Trim() } else { '' }
+  $includeMailSend = -not [string]::IsNullOrWhiteSpace($mailRecipientForGraph)
+
+  & (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Grant-MaesterGraphPermissions.ps1') `
+    -TenantId $TenantId `
+    -PrincipalObjectId $principalId `
+    -PermissionProfile $PermissionProfile `
+    -IncludeMailSend $includeMailSend
+
+  Write-Host "Automation account '$automationAccountName' managed identity is configured for Maester Graph permissions."
+
+  # ──────────────────────────────────────────────
+  # Advanced workload setup (Exchange, Teams, Azure)
+  # ──────────────────────────────────────────────
+
+  $exchangeSetupStatus = if ($IncludeExchange) { 'pending' } else { 'disabled' }
+  $teamsSetupStatus = if ($IncludeTeams) { 'pending' } else { 'disabled' }
+  $azureSetupStatus = if ($IncludeAzure) { 'pending' } else { 'disabled' }
+
+  $exoAppRoleAssignmentIds = @()
+  $teamsRoleAssignmentIds = @()
+  $azureRoleAssignmentIds = @()
+  $exoServicePrincipalDisplayName = $null
+
+  if ($IncludeExchange -or $IncludeTeams) {
     try {
-      $orgResponse = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains'
-      if ($orgResponse.value -and $orgResponse.value.Count -gt 0) {
-        $initialDomain = @($orgResponse.value[0].verifiedDomains | Where-Object { $_.isInitial -eq $true }) | Select-Object -First 1
-        if ($initialDomain) {
-          $exoOrganization = $initialDomain.name
+      $scopes = @(
+        'Application.Read.All',
+        'AppRoleAssignment.ReadWrite.All',
+        'Directory.Read.All',
+        'Directory.AccessAsUser.All',
+        'RoleManagement.ReadWrite.Directory'
+      )
+      Connect-MgGraphSilent -TenantId $TenantId -Scopes $scopes
+    }
+    catch {
+      $action = Resolve-StepFailureAction -StepName 'Microsoft Graph connection for advanced setup' -Message $_.Exception.Message
+      if ($action -eq 'Stop') {
+        throw
+      }
+      $exchangeSetupStatus = if ($IncludeExchange) { 'skipped' } else { $exchangeSetupStatus }
+      $teamsSetupStatus = if ($IncludeTeams) { 'skipped' } else { $teamsSetupStatus }
+    }
+  }
+
+  if ($IncludeExchange -and $exchangeSetupStatus -eq 'pending') {
+    $exchangeAppRoleOk = $false
+    $exchangeRbacOk = $false
+
+    try {
+      $exchangeResourceAppId = '00000002-0000-0ff1-ce00-000000000000'
+      $exchangeManageAsAppRoleId = [Guid]'dc50a0fb-09a3-484d-be87-e023b12c6440'
+
+      $newAssignmentId = Grant-ServicePrincipalAppRoleAssignment -PrincipalObjectId $principalId -ResourceAppId $exchangeResourceAppId -AppRoleId $exchangeManageAsAppRoleId
+      if ($newAssignmentId) {
+        $exoAppRoleAssignmentIds += $newAssignmentId
+        Write-Host 'Assigned Exchange.ManageAsApp to the Automation Account managed identity.'
+      }
+      else {
+        Write-Host 'Exchange.ManageAsApp is already assigned to the Automation Account managed identity.'
+      }
+      $exchangeAppRoleOk = $true
+    }
+    catch {
+      $action = Resolve-StepFailureAction -StepName 'Exchange app role assignment (Exchange.ManageAsApp)' -Message $_.Exception.Message
+      if ($action -eq 'Stop') {
+        throw
+      }
+    }
+
+    try {
+      $miSp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/${principalId}?`$select=id,appId,displayName"
+      if (-not $miSp -or -not $miSp.appId) {
+        throw 'Could not resolve managed identity service principal appId for Exchange setup.'
+      }
+
+      $exoServicePrincipalDisplayName = $miSp.displayName
+
+      $installMsg = "Exchange Online PowerShell is required to grant the managed identity the Exchange RBAC role 'View-Only Configuration'."
+      if (-not (Test-ModuleAvailable -ModuleName 'ExchangeOnlineManagement' -InstallMessage $installMsg)) {
+        throw 'ExchangeOnlineManagement module is not available. Install it and rerun setup with -IncludeExchange.'
+      }
+
+      # Resolve tenant initial domain for Exchange AccessToken connection
+      $exoOrganization = $null
+      try {
+        $orgResponse = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains'
+        if ($orgResponse.value -and $orgResponse.value.Count -gt 0) {
+          $initialDomain = @($orgResponse.value[0].verifiedDomains | Where-Object { $_.isInitial -eq $true }) | Select-Object -First 1
+          if ($initialDomain) {
+            $exoOrganization = $initialDomain.name
+          }
+        }
+      }
+      catch {
+        Write-Verbose "Could not resolve tenant initial domain: $($_.Exception.Message)"
+      }
+
+      Connect-ExchangeOnlineSilent -Organization $exoOrganization
+
+      try {
+        New-ServicePrincipal -AppId $miSp.appId -ObjectId $principalId -DisplayName $miSp.displayName | Out-Null
+        Write-Host "Created/linked Exchange service principal for '$($miSp.displayName)'."
+      }
+      catch {
+        Write-Verbose ("New-ServicePrincipal returned an error (often safe to ignore if it already exists): {0}" -f $_.Exception.Message)
+      }
+
+      try {
+        $roleAssignment = New-ManagementRoleAssignment -Role 'View-Only Configuration' -App $miSp.displayName -ErrorAction Stop
+        if ($roleAssignment -and $roleAssignment.Identity) {
+          Write-Host "Assigned Exchange RBAC role 'View-Only Configuration' to '$($miSp.displayName)'."
+        }
+        else {
+          Write-Host "Ensured Exchange RBAC role 'View-Only Configuration' is assigned to '$($miSp.displayName)'."
+        }
+        $exchangeRbacOk = $true
+      }
+      catch {
+        $message = $_.Exception.Message
+        if ($message -match 'already exists') {
+          Write-Host "Exchange RBAC role 'View-Only Configuration' is already assigned to '$($miSp.displayName)'."
+          $exchangeRbacOk = $true
+        }
+        else {
+          throw
         }
       }
     }
     catch {
-      Write-Verbose "Could not resolve tenant initial domain: $($_.Exception.Message)"
-    }
-
-    Connect-ExchangeOnlineSilent -Organization $exoOrganization
-
-    try {
-      New-ServicePrincipal -AppId $miSp.appId -ObjectId $principalId -DisplayName $miSp.displayName | Out-Null
-      Write-Host "Created/linked Exchange service principal for '$($miSp.displayName)'."
-    }
-    catch {
-      Write-Verbose ("New-ServicePrincipal returned an error (often safe to ignore if it already exists): {0}" -f $_.Exception.Message)
-    }
-
-    try {
-      $roleAssignment = New-ManagementRoleAssignment -Role 'View-Only Configuration' -App $miSp.displayName -ErrorAction Stop
-      if ($roleAssignment -and $roleAssignment.Identity) {
-        Write-Host "Assigned Exchange RBAC role 'View-Only Configuration' to '$($miSp.displayName)'."
-      }
-      else {
-        Write-Host "Ensured Exchange RBAC role 'View-Only Configuration' is assigned to '$($miSp.displayName)'."
-      }
-      $exchangeRbacOk = $true
-    }
-    catch {
-      $message = $_.Exception.Message
-      if ($message -match 'already exists') {
-        Write-Host "Exchange RBAC role 'View-Only Configuration' is already assigned to '$($miSp.displayName)'."
-        $exchangeRbacOk = $true
-      }
-      else {
-        throw
-      }
-    }
-  }
-  catch {
-    $action = Resolve-StepFailureAction -StepName 'Exchange RBAC assignment (View-Only Configuration)' -Message $_.Exception.Message
-    if ($action -eq 'Stop') {
-      throw
-    }
-  }
-
-  if ($exchangeAppRoleOk -and $exchangeRbacOk) {
-    $exchangeSetupStatus = 'configured'
-  }
-  else {
-    $exchangeSetupStatus = 'skipped'
-  }
-}
-
-if ($IncludeTeams -and $teamsSetupStatus -eq 'pending') {
-  try {
-    $newTeamsRoleAssignmentId = Test-DirectoryRoleAssignment -PrincipalObjectId $principalId -RoleDisplayName 'Teams Reader'
-    if ($newTeamsRoleAssignmentId) {
-      $teamsRoleAssignmentIds += $newTeamsRoleAssignmentId
-      Write-Host "Assigned Entra directory role 'Teams Reader' to the Automation Account managed identity."
-    }
-    else {
-      Write-Host "Entra directory role 'Teams Reader' is already assigned to the Automation Account managed identity."
-    }
-
-    $teamsSetupStatus = 'configured'
-  }
-  catch {
-    $action = Resolve-StepFailureAction -StepName "Teams Reader role assignment" -Message $_.Exception.Message
-    if ($action -eq 'Stop') {
-      throw
-    }
-    $teamsSetupStatus = 'skipped'
-  }
-}
-
-if ($IncludeAzure -and $azureSetupStatus -eq 'pending') {
-  $succeededScopes = 0
-  foreach ($scope in @($AzureScopes)) {
-    if ([string]::IsNullOrWhiteSpace($scope)) {
-      continue
-    }
-
-    try {
-      $newAzureAssignmentId = Test-AzureReaderRoleAssignment -Scope $scope -PrincipalObjectId $principalId -SubscriptionId $SubscriptionId
-      if ($newAzureAssignmentId) {
-        $azureRoleAssignmentIds += $newAzureAssignmentId
-        Write-Host "Granted Azure RBAC Reader to Automation managed identity at scope: $scope"
-      }
-      else {
-        Write-Host "Azure RBAC Reader already exists or was already satisfied at scope: $scope"
-      }
-      $succeededScopes++
-    }
-    catch {
-      $action = Resolve-StepFailureAction -StepName "Azure RBAC Reader assignment at scope $scope" -Message $_.Exception.Message
+      $action = Resolve-StepFailureAction -StepName 'Exchange RBAC assignment (View-Only Configuration)' -Message $_.Exception.Message
       if ($action -eq 'Stop') {
         throw
       }
-      continue
+    }
+
+    if ($exchangeAppRoleOk -and $exchangeRbacOk) {
+      $exchangeSetupStatus = 'configured'
+    }
+    else {
+      $exchangeSetupStatus = 'skipped'
     }
   }
 
-  $azureSetupStatus = if ($succeededScopes -gt 0) { 'configured' } else { 'skipped' }
-}
+  if ($IncludeTeams -and $teamsSetupStatus -eq 'pending') {
+    try {
+      $newTeamsRoleAssignmentId = Test-DirectoryRoleAssignment -PrincipalObjectId $principalId -RoleDisplayName 'Teams Reader'
+      if ($newTeamsRoleAssignmentId) {
+        $teamsRoleAssignmentIds += $newTeamsRoleAssignmentId
+        Write-Host "Assigned Entra directory role 'Teams Reader' to the Automation Account managed identity."
+      }
+      else {
+        Write-Host "Entra directory role 'Teams Reader' is already assigned to the Automation Account managed identity."
+      }
 
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_EXCHANGE_STATUS' -Value $exchangeSetupStatus
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_TEAMS_STATUS' -Value $teamsSetupStatus
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_AZURE_STATUS' -Value $azureSetupStatus
+      $teamsSetupStatus = 'configured'
+    }
+    catch {
+      $action = Resolve-StepFailureAction -StepName "Teams Reader role assignment" -Message $_.Exception.Message
+      if ($action -eq 'Stop') {
+        throw
+      }
+      $teamsSetupStatus = 'skipped'
+    }
+  }
 
-Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'EXO_APPROLE_ASSIGNMENT_IDS' -Values @($exoAppRoleAssignmentIds)
-Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'TEAMS_READER_ROLE_ASSIGNMENT_IDS' -Values @($teamsRoleAssignmentIds)
-Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'AZURE_ROLE_ASSIGNMENT_IDS' -Values @($azureRoleAssignmentIds)
+  if ($IncludeAzure -and $azureSetupStatus -eq 'pending') {
+    $succeededScopes = 0
+    foreach ($scope in @($AzureScopes)) {
+      if ([string]::IsNullOrWhiteSpace($scope)) {
+        continue
+      }
 
-if ($exoServicePrincipalDisplayName) {
-  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME' -Value $exoServicePrincipalDisplayName
+      try {
+        $newAzureAssignmentId = Test-AzureReaderRoleAssignment -Scope $scope -PrincipalObjectId $principalId -SubscriptionId $SubscriptionId
+        if ($newAzureAssignmentId) {
+          $azureRoleAssignmentIds += $newAzureAssignmentId
+          Write-Host "Granted Azure RBAC Reader to Automation managed identity at scope: $scope"
+        }
+        else {
+          Write-Host "Azure RBAC Reader already exists or was already satisfied at scope: $scope"
+        }
+        $succeededScopes++
+      }
+      catch {
+        $action = Resolve-StepFailureAction -StepName "Azure RBAC Reader assignment at scope $scope" -Message $_.Exception.Message
+        if ($action -eq 'Stop') {
+          throw
+        }
+        continue
+      }
+    }
+
+    $azureSetupStatus = if ($succeededScopes -gt 0) { 'configured' } else { 'skipped' }
+  }
+
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_EXCHANGE_STATUS' -Value $exchangeSetupStatus
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_TEAMS_STATUS' -Value $teamsSetupStatus
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_AZURE_STATUS' -Value $azureSetupStatus
+
+  Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'EXO_APPROLE_ASSIGNMENT_IDS' -Values @($exoAppRoleAssignmentIds)
+  Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'TEAMS_READER_ROLE_ASSIGNMENT_IDS' -Values @($teamsRoleAssignmentIds)
+  Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'AZURE_ROLE_ASSIGNMENT_IDS' -Values @($azureRoleAssignmentIds)
+
+  if ($exoServicePrincipalDisplayName) {
+    Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME' -Value $exoServicePrincipalDisplayName
+  }
+
 }
 
 # ──────────────────────────────────────────────
@@ -429,19 +543,38 @@ $runbookName = 'maester-runbook'
 $runbookContent = Get-Content -Path $runbookContentPath -Raw
 $armApiVersion = '2024-10-23'
 
-$draftUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName/draft/content?api-version=$armApiVersion"
-Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$draftUri" -Headers $armHeaders -Body $runbookContent -ContentType 'text/powershell' | Out-Null
-Write-Host "Uploaded draft content for runbook '$runbookName'."
+$expectedRunbookContent = $runbookContent.TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+$contentUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName/content?api-version=$armApiVersion"
+$publishLocalContent = $true
+if ($existingAutomationResources) {
+  $originalContent = [string](Invoke-RestMethod -Method GET -Uri "https://management.azure.com$contentUri" -Headers $armHeaders)
+  $normalizedOriginalContent = $originalContent.TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+  $originalHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($normalizedOriginalContent)))
+  $localHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($expectedRunbookContent)))
+  Write-Host "Published/local normalized runbook SHA-256: $originalHash / $localHash"
+  $publishLocalContent = $normalizedOriginalContent -cne $expectedRunbookContent
+  if ($preserveExistingAccess -and $publishLocalContent) {
+    throw "Runtime-only preservation requires matching published/local runbook content. SHA-256 mismatch: published $originalHash; local $localHash. Reconcile the runbook before upgrading."
+  }
+}
+if ($publishLocalContent) {
+  $draftUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName/draft/content?api-version=$armApiVersion"
+  Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$draftUri" -Headers $armHeaders -Body $runbookContent -ContentType 'text/powershell' | Out-Null
+  Write-Host "Uploaded draft content for runbook '$runbookName'."
 
-$publishUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName/publish?api-version=$armApiVersion"
-Invoke-RestMethod -Method POST -Uri "https://management.azure.com$publishUri" -Headers $armHeaders -Body '{}' -ContentType 'application/json' | Out-Null
-Write-Host "Published runbook '$runbookName' with local script content."
+  $publishUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/runbooks/$runbookName/publish?api-version=$armApiVersion"
+  Invoke-RestMethod -Method POST -Uri "https://management.azure.com$publishUri" -Headers $armHeaders -Body '{}' -ContentType 'application/json' | Out-Null
+  Write-Host "Published runbook '$runbookName' with local script content."
+}
+else {
+  Write-Host "Published runbook '$runbookName' already matches the local script; publication was skipped."
+}
 
 # ──────────────────────────────────────────────
 # Easy Auth on optional Web App
 # ──────────────────────────────────────────────
 
-if ($webApp) {
+if ($webApp -and -not $preserveExistingAccess) {
   if (-not $SecurityGroupObjectId -and -not [string]::IsNullOrWhiteSpace($SecurityGroupDisplayName)) {
     Connect-MgGraphSilent -TenantId $TenantId -Scopes 'Group.Read.All','Directory.Read.All'
 
@@ -683,36 +816,44 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 if (-not $publishedLocalRunbook) { throw 'Local Maester runbook publication was not confirmed; weekly schedule was not attached.' }
 
-$jobScheduleId = [string]$deploymentValues['AUTOMATION_JOB_SCHEDULE_ID']
-$parsedJobScheduleId = [guid]::Empty
-if ([string]::IsNullOrWhiteSpace($jobScheduleId) -or -not [guid]::TryParse($jobScheduleId, [ref]$parsedJobScheduleId)) {
-  throw 'AUTOMATION_JOB_SCHEDULE_ID must be a GUID before attaching the weekly schedule.'
+# Re-read all children after publication, before touching any association. Existing
+# associations are read back only, retaining custom parameters, runOn, and IDs.
+$finalAutomationState = Get-MaesterPostDeployAutomationState
+if ([bool]$finalAutomationState.Resources.Existing -ne $existingAutomationResources) {
+  throw 'The Automation association changed during postdeployment; refusing to recreate or overwrite it.'
 }
+$liveAccount = $finalAutomationState.Account
 $jobScheduleUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/jobSchedules/$jobScheduleId`?api-version=2023-11-01"
-$liveAccount = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$expectedAutomationAccountId`?api-version=2023-11-01" -Headers $armHeaders
-$liveSchedules = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$expectedAutomationAccountId/jobSchedules?api-version=2023-11-01" -Headers $armHeaders
-if ($null -eq $liveSchedules.value -or $liveSchedules.value -isnot [System.Collections.IList] -or
-    ($liveSchedules.PSObject.Properties['nextLink'] -and $liveSchedules.nextLink)) {
-  throw 'Automation jobSchedule inventory was incomplete before association.'
-}
-Assert-MaesterJobScheduleWriteTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
-  -JobScheduleId $jobScheduleId -Account $liveAccount -JobSchedules @($liveSchedules.value) `
-  -ReceiptAccountId ([string]$deploymentValues['AUTOMATION_OWNED_ACCOUNT_ID']) `
-  -ReceiptPrincipalId ([string]$deploymentValues['AUTOMATION_OWNED_PRINCIPAL_ID']) `
-  -ReceiptJobScheduleId ([string]$deploymentValues['AUTOMATION_OWNED_JOB_SCHEDULE_ID']) `
-  -AdoptAccountId ([string]$deploymentValues['AUTOMATION_ADOPT_ACCOUNT_ID']) `
-  -AdoptPrincipalId ([string]$deploymentValues['AUTOMATION_ADOPT_PRINCIPAL_ID']) `
-  -AdoptJobScheduleId ([string]$deploymentValues['AUTOMATION_ADOPT_JOB_SCHEDULE_ID'])
-$jobScheduleBody = @{ properties = @{ schedule = @{ name = 'maester-weekly-sunday' }; runbook = @{ name = $runbookName } } } | ConvertTo-Json -Depth 5
-Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders -Body $jobScheduleBody -ContentType 'application/json' | Out-Null
-if ($liveAccount.id -ine $expectedAutomationAccountId -or $liveAccount.identity.principalId -ine $principalId) {
-  throw 'The Automation account identity changed before ownership could be recorded.'
+if (-not $existingAutomationResources) {
+  $jobScheduleBody = @{ properties = @{ schedule = @{ name = 'maester-weekly-sunday' }; runbook = @{ name = $runbookName } } } | ConvertTo-Json -Depth 5
+  Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders -Body $jobScheduleBody -ContentType 'application/json' | Out-Null
 }
 $verifiedSchedule = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$jobScheduleUri" -Headers $armHeaders
+if ([string]$verifiedSchedule.id -ine "$expectedAutomationAccountId/jobSchedules/$jobScheduleId" -or
+    [string]$verifiedSchedule.name -ine $jobScheduleId -or
+    [string]$verifiedSchedule.type -ine 'Microsoft.Automation/automationAccounts/jobSchedules') {
+  throw 'The Automation association readback does not match its exact ID, name, and type.'
+}
 Assert-MaesterOwnershipReceiptTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
   -ExpectedJobScheduleId $jobScheduleId -Account $liveAccount -JobSchedule $verifiedSchedule
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_ACCOUNT_ID' -Value $expectedAutomationAccountId
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_PRINCIPAL_ID' -Value $principalId
-Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_JOB_SCHEDULE_ID' -Value $jobScheduleId
-Write-Host "Attached verified local runbook '$runbookName' to the weekly schedule."
-
+if ($existingAutomationResources -and
+    (ConvertTo-MaesterCanonicalJson $verifiedSchedule.properties) -cne $originalAssociationProperties) {
+  throw 'The existing Automation association properties changed during postdeployment.'
+}
+# Preserve existing receipts exactly; explicit adoption records a receipt only
+# after the live association has been verified without rewriting it.
+if (-not $preserveExistingAccess -or [string]::IsNullOrWhiteSpace($ownershipParameters.ReceiptAccountId)) {
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_ACCOUNT_ID' -Value $expectedAutomationAccountId
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_PRINCIPAL_ID' -Value $principalId
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_OWNED_JOB_SCHEDULE_ID' -Value $jobScheduleId
+}
+if ($existingAutomationResources) {
+  Write-Host "Verified existing weekly association for local runbook '$runbookName'; its properties were retained."
+}
+else {
+  # The successful first association is now an existing deployment, including
+  # when a caller retries this script directly after a later summary failure.
+  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_EXISTING_RESOURCES' -Value 'true'
+  $env:AUTOMATION_EXISTING_RESOURCES = 'true'
+  Write-Host "Attached verified local runbook '$runbookName' to the weekly schedule."
+}

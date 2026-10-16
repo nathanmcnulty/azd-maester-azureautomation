@@ -117,12 +117,95 @@ $ownership = if ($resourceGroupExists) {
   [pscustomobject]@{ JobScheduleId = [guid]::NewGuid().ToString(); OwnedJobScheduleId = '' }
 }
 
+# Existing/fresh decisions are refreshed from Azure on every provision. Never trust
+# a persisted omission flag after a failed or interrupted deployment.
+foreach ($controlName in @('AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION')) {
+  $processValue = [Environment]::GetEnvironmentVariable($controlName)
+  $selectedValue = [string]$selectedValues[$controlName]
+  if (-not [string]::IsNullOrWhiteSpace($processValue) -and -not [string]::IsNullOrWhiteSpace($selectedValue) -and
+      (Get-MaesterUpgradeBoolean -Value $processValue -Name $controlName) -ne (Get-MaesterUpgradeBoolean -Value $selectedValue -Name $controlName)) {
+    throw "The process $controlName differs from the selected azd environment."
+  }
+}
+$preserveUpgradeAccess = Get-MaesterUpgradeBoolean -Name 'AUTOMATION_UPGRADE_PRESERVE_ACCESS' `
+  -Value $(if ($selectedValues['AUTOMATION_UPGRADE_PRESERVE_ACCESS']) { [string]$selectedValues['AUTOMATION_UPGRADE_PRESERVE_ACCESS'] } else { [string]$env:AUTOMATION_UPGRADE_PRESERVE_ACCESS })
+$validationControl = if ($selectedValues['AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION']) {
+  [string]$selectedValues['AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION']
+} else { [string]$env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION }
+Get-MaesterUpgradeBoolean -Name 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION' -Value $validationControl -Default $true | Out-Null
+
+$schedules = @()
+$runbooks = @()
+if ($account) {
+  if (-not $ownership.OwnedJobScheduleId) {
+    throw 'An existing Automation account has no verified live association; reconcile it before provisioning.'
+  }
+  foreach ($kind in @('schedules', 'runbooks')) {
+    $inventoryJson = & az rest --method GET --uri "https://management.azure.com$expectedAccountId/$kind`?api-version=2023-11-01" --subscription $SubscriptionId -o json
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($inventoryJson)) { throw "Could not inspect live Automation $kind." }
+    $inventory = $inventoryJson | ConvertFrom-Json -ErrorAction Stop
+    Assert-MaesterCompleteInventory -Response $inventory -Name $kind
+    if ($kind -eq 'schedules') { $schedules = @($inventory.value) } else { $runbooks = @($inventory.value) }
+  }
+}
+$verifiedResources = Assert-MaesterExistingAutomationResources -ExpectedAccountId $expectedAccountId `
+  -Account $account -JobSchedules $jobSchedules -Schedules $schedules -Runbooks $runbooks `
+  -Ownership $ownership -RequireExisting:$preserveUpgradeAccess
+if ($preserveUpgradeAccess) {
+  # The bounded mode leaves non-runtime infrastructure untouched. Its existing
+  # outputs must still resolve to the exact deployed resources before ARM runs.
+  $getExactResource = {
+    param($path)
+    $json = & az rest --method GET --uri "https://management.azure.com$path" --subscription $SubscriptionId -o json
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) { throw 'Could not verify an existing deployment target for runtime-only upgrade.' }
+    $json | ConvertFrom-Json -ErrorAction Stop
+  }
+  Resolve-MaesterDeploymentTargets -EnvironmentValues $selectedValues -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $rgName -EnvironmentName $EnvironmentName -SolutionName 'automation-account' -GetResource $getExactResource | Out-Null
+  $verifiedAccount = Resolve-MaesterMainDeploymentTarget -EnvironmentValues $selectedValues `
+    -NameOutput 'automationAccountName' -PrincipalOutput 'automationPrincipalId' `
+    -ProviderType 'Microsoft.Automation/automationAccounts' -ApiVersion '2023-11-01' `
+    -SubscriptionId $SubscriptionId -ResourceGroupName $rgName -EnvironmentName $EnvironmentName `
+    -SolutionName 'automation-account' -GetResource $getExactResource
+  if ($verifiedAccount.id -ine $expectedAccountId -or $verifiedAccount.identity.principalId -ine $account.identity.principalId) {
+    throw 'The runtime-only upgrade target differs from the verified Automation ownership binding.'
+  }
+  if ((Get-MaesterUpgradeBoolean -Name 'INCLUDE_WEB_APP' -Value ([string]$selectedValues['INCLUDE_WEB_APP'])) -ne
+      (Get-MaesterUpgradeBoolean -Name 'WEB_APP_ENABLED' -Value ([string]$selectedValues['WEB_APP_ENABLED']))) {
+    throw 'Runtime-only upgrade cannot change the existing Web App deployment mode.'
+  }
+  # Runtime-only authorization does not authorize replacing a different script.
+  # Download raw bytes to avoid CLI stdout/line-ending/JSON transformations.
+  $publishedContentPath = [IO.Path]::GetTempFileName()
+  try {
+    & az rest --method GET --uri "https://management.azure.com$expectedAccountId/runbooks/maester-runbook/content?api-version=2024-10-23" --subscription $SubscriptionId --output-file $publishedContentPath -o none
+    if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $publishedContentPath).Length -eq 0) {
+      throw 'Could not verify the existing published runbook content before runtime-only upgrade.'
+    }
+    $publishedContent = (Get-Content -LiteralPath $publishedContentPath -Raw -Encoding utf8).TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+    $localContent = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-MaesterAutomationRunbook.ps1') -Raw).TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+    $publishedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($publishedContent)))
+    $localHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($localContent)))
+    Write-Host "Published/local normalized runbook SHA-256 before upgrade: $publishedHash / $localHash"
+    if ($publishedContent -cne $localContent) {
+      throw 'Runtime-only upgrade requires matching published/local runbook content; review and separately authorize any script replacement before retrying.'
+    }
+  }
+  finally { Remove-Item -LiteralPath $publishedContentPath -Force -ErrorAction SilentlyContinue }
+  Write-Host 'Verified runtime-only upgrade: non-runtime infrastructure and access configuration will remain untouched.'
+}
+
 if ($ownership.OwnedJobScheduleId) {
   Write-Host "Verified existing template jobSchedule '$($ownership.OwnedJobScheduleId)'; its linkage and resource lock remain intact."
 }
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_JOB_SCHEDULE_ID' -Value $ownership.JobScheduleId
-# Check Automation Account quota in the target region
-if ($location) {
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_EXISTING_RESOURCES' -Value $verifiedResources.Existing.ToString().ToLowerInvariant()
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_UPGRADE_PRESERVE_ACCESS' -Value $preserveUpgradeAccess.ToString().ToLowerInvariant()
+# Runtime-only upgrades never create an Automation account or consume account quota.
+if ($preserveUpgradeAccess) {
+  Write-Host 'Skipping account-creation quota check for verified runtime-only upgrade.'
+}
+elseif ($location) {
   Write-Host "Checking Automation Account quota in region '$location'..."
   try {
     $existingAccountsJson = az automation account list --subscription $SubscriptionId --query "[?location=='$location']" -o json 2>$null
