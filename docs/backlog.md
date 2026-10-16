@@ -5,9 +5,9 @@
 
 - **Schema version:** 1.0.0
 - **Repository:** nathanmcnulty/azd-maester-azureautomation
-- **Source revision:** `f307d58aa2616c3eea2f23bf366e3bc25bbb081d`
-- **Captured:** 2026-10-07
-- **Items:** 5
+- **Source revision:** `458a1e9a1d09e4baca5cbd917d0b2a0dce055444`
+- **Captured:** 2026-10-16
+- **Items:** 10
 
 ## MAUTO-001: Reconcile this backlog with current source and active work
 
@@ -173,6 +173,62 @@ The report captured on 2026-10-03 is closed after the reviewed fix merged; this 
 
 Review MAUTO-004 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
 
+## MAUTO-008: Enforce the PowerShell 7.6 and Pester 6.2 authoring baseline
+
+- **Kind:** maintenance
+- **Priority:** P1
+- **Status:** done
+- **Wave:** 1
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The runtime upgrade selects PowerShell 7.6, but maintained scripts lacked a minimum-version guard and repository CI still selected Pester 5.7.1.
+
+**Scope:**
+
+- Owned scripts/&ast;.ps1 entry points
+- Repository validation workflow and developer guidance
+
+**Acceptance:**
+
+- Require PowerShell 7.6+ before owned script bodies execute; preserve immutable vendored sources and historical receipts.
+- Install and import exact Pester 6.2.0 in CI and document equivalent local validation.
+- Run the full offline suite on the supported baseline; retain separate live runtime/preservation gates.
+
+**Validation:**
+
+- Invoke-Pester -Path ./tests -CI with PowerShell 7.6+ and imported Pester 6.2.0
+- Parse all PowerShell and inspect ScriptRequirements for every owned script; verify permission evidence hashes and canonical backlog checks.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/issues/24
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/pull/26
+- docs/development.md
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/pull/28
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/blob/c53cbe1e484fbf26e9834fe202783a934f849523/docs/backlog.json
+
+**Evidence:**
+
+- 2026-10-16&colon; Source follow-up based on runtime PR26 head 36804911c0ea8de8f301a6f4ec6ba995c8c55124. All nine owned scripts enforce PowerShell 7.6 before execution. Vendored scripts, runtime package locks and historical evidence are unchanged.
+- PowerShell 7.6.6 with actual Pester 6.2.0&colon; all 75 repository tests passed, zero failed or skipped. This is offline source evidence; it does not establish native runtime startup, runbook preservation or workload execution. Existing runtime/preservation PRs and live gates remain open.
+- Renumbered the authoring-baseline task to MAUTO-008 to preserve viewer tasks MAUTO-006/007 already allocated in reviewed pending preservation branch c53cbe1e484fbf26e9834fe202783a934f849523. Both original viewer records remain proposed and unchanged; this is metadata reconciliation, not viewer implementation or authorization.
+
+**Review and authorization note:**
+
+Review MAUTO-008 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
 ## MAUTO-003: Reconcile shared hook/webapp versions and host permission deltas
 
 - **Kind:** maintenance
@@ -286,3 +342,223 @@ Shared pilots are already vendored; host-specific execution and report access st
 **Review and authorization note:**
 
 Review MAUTO-002 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-009: Keep configuration drift disabled and isolated by default
+
+- **Kind:** maintenance
+- **Priority:** P1
+- **Status:** done
+- **Wave:** 3
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+Omitting DriftRoot leaves upstream Maester able to discover unapproved input from an inherited process environment variable.
+
+**Scope:**
+
+- scripts/Invoke-MaesterAutomationRunbook.ps1
+- tests/DriftIsolation.Tests.ps1
+- docs/drift-isolation.md
+- docs/backlog.json
+- docs/backlog.md
+
+**Acceptance:**
+
+- Exclude the locked upstream drift file before Pester discovery and clear its ambient environment during invocation, restoring prior process state on success and failure.
+- Preserve ordinary assessment, genuine findings, publication and failure semantics; do not enable drift, fetch data or add permissions.
+- Prove the original inherited-input defect and corrected isolation with exact production configuration/invocation tests plus actual locked suite/report qualification.
+
+**Validation:**
+
+- PowerShell 7.6+ and Pester 6.2&colon; Invoke-Pester ./tests -CI
+- Parse all PowerShell; canonical backlog schema/render checks; fixtures are not native job or publisher proof.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- docs/drift-isolation.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/090001c61660d6522d2c5d4df6581af297015b35/docs/drift-analysis-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/2
+
+**Evidence:**
+
+- PowerShell 7.6.6/Pester 6.2.0 full repository validation passed 79/79 with zero nonpasses; parser and differential analyzer checks found no new supported-runtime issue. Three isolation regression cases fail against the original runner, and all four pass with the fix.
+- Actual offline locked Maester 2.2.0 Invoke-Maester qualification used this host production configuration/invocation blocks, an unchanged hash-verified upstream suite, one ordinary synthetic test and an inherited unapproved input folder. Exactly one ordinary test passed, drift stayed excluded, the inherited environment was restored, and no HTTP/authentication tripwire fired. Qualification supplies offline connection flags and invokes only assessment blocks; publisher paths are outside this check, and no native job, workload identity, Blob publication/access or cleanup outcome is claimed.
+- Default-disabled isolation only; MAUTO-010 retains the approved-input adapter, normalization/privacy and native qualification gates. Existing runtime/deployment validation evidence is preserved.
+
+**Review and authorization note:**
+
+Review MAUTO-009 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-006: Implement optional Caddy Container App report viewer
+
+- **Kind:** feature
+- **Priority:** P2
+- **Status:** proposed
+- **Wave:** 4
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The shared viewer design is complete, but this standalone Automation runner has no Caddy provider implementation.
+
+**Scope:**
+
+- infra/
+- scripts/
+- docs/
+- azd-permissions.json
+
+**Acceptance:**
+
+- Add exact -IncludeContainerWebApp mapping, default-off and exclusive with both other viewer flags, including legacy -IncludeWebApp; preserve existing hooks and deployment-validation behavior.
+- Use only an immutable signed image/SBOM and reviewed versioned azd-reference component pin; publish a private bounded HTML projection plus manifest with ETag/conditional pointer, BlobDataContributor only where required, and viewer managed identity read-only.
+- Bound Caddy paths, fixed loopback GET/HEAD routes with no shared report volume, size/poll/LKG/atomic switch, HTTPS and native tenant/audience group authorization; reject missing/overage groups, foreign tenant, forged headers and host bypass. Record owned rollback/deletion receipts and validate with offline fixtures before authorized lab writes.
+- Use a dedicated viewer-projection container with immutable HTML/manifest versions and an ordered ETag-conditional latest pointer. Assume all app containers can use attached identities; expose no archive, Graph or resource-write privilege to the viewer.
+- Before feature completion, pass the design native gates in the authorized lab with concrete tenant/subscription/group/test users&colon; allowed and denied report/asset/host access, exact report bytes, concurrency/staleness, provider-specific rotation/cold start, rollback and ownership-aware cleanup. Preserve failed evidence; no live success claim from fixtures.
+
+**Validation:**
+
+- Run the existing standalone validation workflow and new offline native fixtures; fixtures do not prove live auth, provider acceptance or report receipt.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/main/docs/report-viewer-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/5
+
+**Evidence:**
+
+- _none_
+
+**Review and authorization note:**
+
+Review MAUTO-006 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-007: Implement optional Static Web Apps Standard report viewer
+
+- **Kind:** feature
+- **Priority:** P2
+- **Status:** proposed
+- **Wave:** 4
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The shared viewer design is complete, but this standalone Automation runner has no Static Web Apps provider implementation.
+
+**Scope:**
+
+- infra/
+- scripts/
+- docs/
+- azd-permissions.json
+
+**Acceptance:**
+
+- Add exact -IncludeStaticWebApp mapping, default-off and exclusive with both other viewer flags, including legacy -IncludeWebApp; preserve existing hooks and deployment-validation behavior.
+- Use Standard/custom tenant issuer and a reviewed Report.Reader role-source function/claim mapping with fail-closed missing, invalid and overage claim behavior; do not add tenant-wide Graph reads.
+- Keep end-user UAMI/FIC distinct from the high-trust deployment-token publisher; bind fixed safe HTML, auth config, hash, revocation/reset and owned teardown receipts. Validate offline before authorized lab writes.
+- Qualify the documented preview/support posture of function-based role assignment. Keep site-deployment authority and token access out of Maester runners&colon; a separate trusted publisher must bind fixed auth/function config hashes and reject report-supplied config or code.
+- Before feature completion, pass the design native gates in the authorized lab with concrete tenant/subscription/group/test users&colon; allowed and denied report/asset/host access, exact report bytes, concurrency/staleness, provider-specific rotation/cold start, rollback and ownership-aware cleanup. Preserve failed evidence; no live success claim from fixtures.
+
+**Validation:**
+
+- Run the existing standalone validation workflow and new offline native fixtures; no deployment or delivery claim is made.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/main/docs/report-viewer-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/4
+
+**Evidence:**
+
+- _none_
+
+**Review and authorization note:**
+
+Review MAUTO-007 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-010: Implement approved data-only configuration drift inputs
+
+- **Kind:** feature
+- **Priority:** P2
+- **Status:** proposed
+- **Wave:** 4
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+Upstream drift comparison exists, but this host has no approved artifact/target/privacy contract or live qualification.
+
+**Scope:**
+
+- scripts/Invoke-MaesterAutomationRunbook.ps1
+- tests/
+- docs/
+- azd-permissions.json
+
+**Acceptance:**
+
+- Follow the reviewed MCAT-011 design&colon; explicitly enabled data-only artifacts, immutable approved baseline, tenant/environment/run/source/hash/freshness binding, bounded JSON/path/link/duplicate validation and reviewed schemas, normalization and exclusions.
+- Use the actual locked upstream suite with expected positive case counts and fail on missing suite, zero cases, malformed/scalar/settings inputs, comparison errors and container failures; preserve default-off isolation and reused-process environment restoration.
+- Inspect actual HTML/JSON/Markdown/logs for planted sensitive values; preserve separate comparison, report and publication outcomes and rollback. Add no automatic capture, baseline update or remediation.
+- Independently review the adapter and qualify authorized native job execution, report access, rollback and exact owned cleanup; coordinate a second host before shared extraction.
+
+**Validation:**
+
+- PowerShell 7.6+/Pester 6.2 registered tests and actual locked suite/report fixtures.
+- Separate authorized native host/report/access/cleanup qualification; local metadata grants no live authority.
+
+**Dependencies:**
+
+- MAUTO-009
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- docs/drift-isolation.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/090001c61660d6522d2c5d4df6581af297015b35/docs/drift-analysis-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/2
+
+**Evidence:**
+
+- _none_
+
+**Review and authorization note:**
+
+Review MAUTO-010 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
