@@ -1,7 +1,7 @@
 # Automation runtime package lock
 
 `infra/main.bicep` imports exact PSGallery package versions into the PowerShell
-7.4 Automation runtime. Each `contentLink` records the SHA-256 of the downloaded
+7.6 Automation runtime. Each `contentLink` records the SHA-256 of the downloaded
 `.nupkg`. The lab accepted a deliberately incorrect `contentHash` during an
 Automation package import, so that ARM field is **not an enforced integrity
 boundary**. The published local runbook independently downloads each exact
@@ -40,3 +40,11 @@ This seed is not attached to the weekly schedule. Postprovision publishes the
 local runbook, confirms its published content, and only then creates the weekly
 job-schedule association. If setup or publication fails, no recurring run is
 attached.
+
+## Hosted runtime baseline
+
+The template selects `PowerShell-76-Maester` with PowerShell 7.6 on .NET 10 LTS
+and the nine exact package versions and hashes above. Package-import
+observations do not establish runbook execution on this runtime. Microsoft documents
+[PowerShell 7.6 Automation support](https://learn.microsoft.com/en-us/azure/automation/automation-runbook-types#powershell-runbooks);
+[PowerShell 7.6 uses .NET 10 LTS](https://learn.microsoft.com/en-us/powershell/scripting/install/powershell-support-lifecycle).
