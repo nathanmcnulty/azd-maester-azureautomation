@@ -232,7 +232,7 @@ function Get-MaesterPostDeployAutomationState {
 $initialAutomationState = Get-MaesterPostDeployAutomationState
 $existingAutomationResources = [bool]$initialAutomationState.Resources.Existing
 $originalAssociationProperties = if ($existingAutomationResources) {
-  ConvertTo-MaesterCanonicalJson $initialAutomationState.Resources.JobSchedule.properties
+  ConvertTo-MaesterJobSchedulePropertiesJson $initialAutomationState.Resources.JobSchedule.properties
 } else { $null }
 $originalScheduleProperties = if ($existingAutomationResources) {
   ConvertTo-MaesterCanonicalJson $initialAutomationState.Resources.Schedule.properties
@@ -801,7 +801,7 @@ if (-not $publishedLocalRunbook) { throw 'Local Maester runbook publication was 
 if ($existingAutomationResources) {
   $beforeRuntimeState = Get-MaesterPostDeployAutomationState
   if (-not $beforeRuntimeState.Resources.Existing -or
-      (ConvertTo-MaesterCanonicalJson $beforeRuntimeState.Resources.JobSchedule.properties) -cne $originalAssociationProperties -or
+      (ConvertTo-MaesterJobSchedulePropertiesJson $beforeRuntimeState.Resources.JobSchedule.properties) -cne $originalAssociationProperties -or
       (ConvertTo-MaesterCanonicalJson $beforeRuntimeState.Resources.Schedule.properties) -cne $originalScheduleProperties) {
     throw 'The existing Automation association or schedule changed before the runtime PATCH.'
   }
@@ -841,6 +841,10 @@ if ($existingAutomationResources -and
     (ConvertTo-MaesterCanonicalJson $finalAutomationState.Resources.Schedule.properties) -cne $originalScheduleProperties) {
   throw 'The existing Automation schedule properties changed during postdeployment.'
 }
+if ($existingAutomationResources -and
+    (ConvertTo-MaesterJobSchedulePropertiesJson $finalAutomationState.Resources.JobSchedule.properties) -cne $originalAssociationProperties) {
+  throw 'The existing Automation association properties changed during final inventory readback.'
+}
 $liveAccount = $finalAutomationState.Account
 $jobScheduleUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/jobSchedules/$jobScheduleId`?api-version=2023-11-01"
 if (-not $existingAutomationResources) {
@@ -852,7 +856,7 @@ Assert-MaesterJobScheduleIdentity -ExpectedAccountId $expectedAutomationAccountI
 Assert-MaesterOwnershipReceiptTarget -ExpectedAccountId $expectedAutomationAccountId -ExpectedPrincipalId $principalId `
   -ExpectedJobScheduleId $jobScheduleId -Account $liveAccount -JobSchedule $verifiedSchedule
 if ($existingAutomationResources -and
-    (ConvertTo-MaesterCanonicalJson $verifiedSchedule.properties) -cne $originalAssociationProperties) {
+    (ConvertTo-MaesterJobSchedulePropertiesJson $verifiedSchedule.properties) -cne $originalAssociationProperties) {
   throw 'The existing Automation association properties changed during postdeployment.'
 }
 # Preserve existing receipts exactly; explicit adoption records a receipt only

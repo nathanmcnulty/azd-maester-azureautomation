@@ -32,11 +32,51 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     $jobId = '22222222-2222-4222-8222-222222222222'
     $tags = @{ workload = 'maester'; solution = 'automation-account'; environment = 'test'; managedBy = 'azd' }
     $account = [pscustomobject]@{ id = $accountId; name = 'aa-exact-output'; type = 'Microsoft.Automation/automationAccounts'; tags = $tags; identity = @{ type = 'SystemAssigned'; principalId = $principal } }
-    $job = [pscustomobject]@{ id = "$accountId/jobSchedules/$jobId"; name = $jobId; type = 'Microsoft.Automation/automationAccounts/jobSchedules'; properties = @{
-      jobScheduleId = $jobId; schedule = @{ name = 'maester-weekly-sunday' }; runbook = @{ name = 'maester-runbook' }
-      parameters = @{ IncludeAzure = 'false'; ExistingParameter = 'retained' }; runOn = 'existing-hybrid-worker'
-    } }
-    $schedule = [pscustomobject]@{ id = "$accountId/schedules/maester-weekly-sunday"; name = 'maester-weekly-sunday'; type = 'Microsoft.Automation/automationAccounts/schedules'; properties = @{ frequency = 'Week'; interval = 2; timeZone = 'Pacific/Auckland'; isEnabled = $false; startTime = '2026-10-20T01:23:00Z' } }
+    # Legacy list and exact GET can represent an empty parameter bag differently.
+    # Keep independently parsed raw service objects with the observed labels.
+    $jobListJson = @'
+{
+  "value": [{
+    "id": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/rg-test/providers/Microsoft.Automation/automationAccounts/aa-exact-output/jobSchedules/22222222-2222-4222-8222-222222222222",
+    "type": "Microsoft.Automation/AutomationAccounts/JobSchedules",
+    "properties": {
+      "jobScheduleId": "22222222-2222-4222-8222-222222222222",
+      "schedule": { "name": "maester-weekly-sunday" },
+      "runbook": { "name": "maester-runbook" },
+      "parameters": null,
+      "runOn": null
+    }
+  }]
+}
+'@
+    $jobList = $jobListJson | ConvertFrom-Json
+    $job = $jobList.value[0]
+    $readbackJob = ($jobListJson.Replace('"parameters": null', '"parameters": {}') | ConvertFrom-Json).value[0]
+    # Include the complete observed schedule property shape. List responses are
+    # detached below; nullable fields, arrays, timing offsets and nextRun stay exact.
+    $schedule = @'
+{
+  "id": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/rg-test/providers/Microsoft.Automation/automationAccounts/aa-exact-output/schedules/maester-weekly-sunday",
+  "name": "maester-weekly-sunday",
+  "type": "Microsoft.Automation/automationAccounts/schedules",
+  "properties": {
+    "description": null,
+    "creationTime": "2020-01-01T00:00:00Z",
+    "lastModifiedTime": "2020-02-01T00:00:00Z",
+    "startTime": "2026-10-20T01:23:00Z",
+    "startTimeOffsetMinutes": 780,
+    "expiryTime": "9999-12-31T23:59:59Z",
+    "expiryTimeOffsetMinutes": 780,
+    "isEnabled": false,
+    "nextRun": "2026-11-03T01:23:00Z",
+    "nextRunOffsetMinutes": 780,
+    "interval": 2,
+    "frequency": "Week",
+    "timeZone": "Pacific/Auckland",
+    "advancedSchedule": { "monthDays": null, "monthlyOccurrences": null, "weekDays": ["Sunday"] }
+  }
+}
+'@ | ConvertFrom-Json
     # Authoritative 2024-10-23 runbook response. Legacy 2023-11-01 responses
     # are detached and lose runtimeEnvironment in the version-aware REST mock.
     # Preserve raw types, optional fields, quotes, newlines and literal azd syntax.
@@ -75,14 +115,14 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     }
     $global:upgradeFixture = @{
       Root = $root; Scripts = $scripts; Values = $values; Account = $account; Job = $job; Schedule = $schedule; Runbook = $runbook; Runtime = $runtime
-      JobList = [pscustomobject]@{ value = @($job) }; ScheduleList = [pscustomobject]@{ value = @($schedule) }; RunbookList = [pscustomobject]@{ value = @($runbook) }
+      JobList = $jobList; ScheduleList = [pscustomobject]@{ value = @($schedule) }; RunbookList = [pscustomobject]@{ value = @($runbook) }
       Group = [pscustomobject]@{ id = $scope; name = 'rg-test'; type = 'Microsoft.Resources/resourceGroups' }
       Storage = [pscustomobject]@{ id = "$scope/providers/Microsoft.Storage/storageAccounts/stmaester6cykv256tyq6q"; name = 'stmaester6cykv256tyq6q'; type = 'Microsoft.Storage/storageAccounts'; tags = $tags }
       WebApp = [pscustomobject]@{ id = "$scope/providers/Microsoft.Web/sites/app-maester-6cykv256tyq6q"; name = 'app-maester-6cykv256tyq6q'; type = 'Microsoft.Web/sites'; kind = 'app'; tags = $tags; properties = @{ defaultHostName = 'app-maester-6cykv256tyq6q.azurewebsites.net'; serverFarmId = '' } }
       LocalContent = $localContent; PublishedContent = $localContent; Draft = ''; Calls = [Collections.Generic.List[string]]::new()
       RuntimePatchBodies = [Collections.Generic.List[string]]::new(); RuntimePatchAttempts = 0; FailRuntimePatch = ''; AfterRuntimePatch = $null; RuntimeReads = 0; RunbookReads = 0; FinalRunbookReads = 0; BeforeRunbookRead = $null; BeforeFinalRunbookRead = $null; BeforeContentRead = $null; ContentReads = 0
       RunbookInventoryResponses = [Collections.Generic.List[object]]::new()
-      SetupCalls = 0; ValidationCalls = 0; GraphGrantCalls = 0; FailPublication = $false; DisappearOnFinalRead = $false; InventoryReads = 0; ReadbackJob = $null
+      SetupCalls = 0; ValidationCalls = 0; GraphGrantCalls = 0; FailPublication = $false; DisappearOnFinalRead = $false; InventoryReads = 0; ReadbackJob = $readbackJob; BeforeJobListRead = $null; BeforeExactJobRead = $null; ExactJobReads = 0
     }
   }
   # All external commands are mocked, including module import. These tests never
@@ -114,6 +154,25 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     $global:upgradeFixture.Job = $json | ConvertFrom-Json
     $global:upgradeFixture.JobList = [pscustomobject]@{ value = @($global:upgradeFixture.Job) }
     $global:upgradeFixture.ReadbackJob = $json | ConvertFrom-Json
+  }
+  function Set-UpgradeJobParameters {
+    param([Parameter(Mandatory)]$Job, [Parameter(Mandatory)][string]$Json)
+    if ($Json -eq 'missing') { $Job.properties.PSObject.Properties.Remove('parameters'); return }
+    $value = ('{"parameters":' + $Json + '}') | ConvertFrom-Json
+    $Job.properties | Add-Member -NotePropertyName parameters -NotePropertyValue $value.parameters -Force
+  }
+  function Assert-UpgradeNoWrites {
+    $fixture = $global:upgradeFixture
+    ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set|az deployment|/jobs\?|/roleAssignments|graph.microsoft.com'
+    $fixture.RuntimePatchAttempts | Should -Be 0
+    $fixture.ValidationCalls | Should -Be 0
+    $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
+    Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
+    Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
+    Should -Invoke Grant-ServicePrincipalAppRoleAssignment -Times 0 -Exactly
+    Should -Invoke Test-DirectoryRoleAssignment -Times 0 -Exactly
+    Should -Invoke Test-AzureReaderRoleAssignment -Times 0 -Exactly
   }
   function Set-UpgradeCustomMetadata {
     $fixture = $global:upgradeFixture
@@ -174,7 +233,12 @@ Describe 'Existing upgrade postdeployment preservation' {
     Import-UpgradeFixture
     Mock Import-Module { }
     Mock Get-AzCliSubscriptionContext { [pscustomobject]@{ tenantId = 'tenant-test' } }
-    Mock az { $global:LASTEXITCODE = 0; 'mock-token' }
+    Mock az {
+      $global:upgradeFixture.Calls.Add("az $($args -join ' ')")
+      if ($args[0] -ne 'account' -or $args[1] -ne 'get-access-token') { throw "Unexpected Azure CLI call: $args" }
+      $global:LASTEXITCODE = 0
+      'mock-token'
+    }
     Mock azd {
       $global:LASTEXITCODE = 0
       $global:upgradeFixture.Calls.Add("azd $($args -join ' ')")
@@ -218,9 +282,11 @@ Describe 'Existing upgrade postdeployment preservation' {
       if ($path -like '*/jobSchedules') {
         $fixture.InventoryReads++
         if ($fixture.DisappearOnFinalRead -and $fixture.InventoryReads -gt 1) { return [pscustomobject]@{ value = @() } }
-        return $fixture.JobList
+        $response = $fixture.JobList | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        if ($fixture.BeforeJobListRead) { & $fixture.BeforeJobListRead $response $fixture }
+        return $response
       }
-      if ($path -like '*/schedules') { return $fixture.ScheduleList }
+      if ($path -like '*/schedules') { return ($fixture.ScheduleList | ConvertTo-Json -Depth 30 | ConvertFrom-Json) }
       if ($path -like '*/runbooks') {
         if ($Uri -ne "$path`?api-version=2023-11-01") { throw "Unexpected runbook inventory API version: $Uri" }
         # The legacy list endpoint omits runtimeEnvironment. Never return the
@@ -230,7 +296,13 @@ Describe 'Existing upgrade postdeployment preservation' {
         $fixture.RunbookInventoryResponses.Add($response)
         return $response
       }
-      if ($path -eq "https://management.azure.com$($fixture.Job.id)") { if ($null -ne $fixture.ReadbackJob) { return $fixture.ReadbackJob }; return $fixture.Job }
+      if ($path -eq "https://management.azure.com$($fixture.Job.id)") {
+        $fixture.ExactJobReads++
+        $source = if ($null -ne $fixture.ReadbackJob) { $fixture.ReadbackJob } else { $fixture.Job }
+        $response = $source | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        if ($fixture.BeforeExactJobRead) { & $fixture.BeforeExactJobRead $response $fixture }
+        return $response
+      }
       if ($path -eq "https://management.azure.com$($fixture.Runtime.id)") {
         $fixture.RuntimeReads++
         return ($fixture.Runtime | ConvertTo-Json -Depth 30 | ConvertFrom-Json)
@@ -285,6 +357,247 @@ Describe 'Existing upgrade postdeployment preservation' {
     Should -Invoke Test-DirectoryRoleAssignment -Times 0 -Exactly
     Should -Invoke Test-AzureReaderRoleAssignment -Times 0 -Exactly
     $global:upgradeFixture.GraphGrantCalls | Should -Be 0
+  }
+
+  It 'retains observed list-null and exact-empty association shapes across an already-bound full-hook repeat' {
+    $fixture = $global:upgradeFixture
+    [object]::ReferenceEquals($fixture.Job, $fixture.ReadbackJob) | Should -BeFalse
+    [object]::ReferenceEquals($fixture.Job.properties, $fixture.ReadbackJob.properties) | Should -BeFalse
+    $fixture.Job.PSObject.Properties['name'] | Should -BeNullOrEmpty
+    $fixture.Job.type | Should -BeExactly 'Microsoft.Automation/AutomationAccounts/JobSchedules'
+    $fixture.Job.properties.parameters | Should -BeNullOrEmpty
+    ($fixture.ReadbackJob.properties.parameters | ConvertTo-Json -Compress) | Should -BeExactly '{}'
+    $fixture.Job.properties.runOn | Should -BeNullOrEmpty
+    $beforeList = $fixture.JobList | ConvertTo-Json -Depth 30 -Compress
+    $beforeExact = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $beforeSchedule = $fixture.Schedule | ConvertTo-Json -Depth 30 -Compress
+
+    Invoke-UpgradeSetup
+    Invoke-UpgradeSetup
+
+    Assert-UpgradeNoWrites
+    $fixture.InventoryReads | Should -Be 6
+    $fixture.ExactJobReads | Should -Be 2
+    ($fixture.JobList | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeList
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeExact
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.Schedule | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeSchedule
+    @($fixture.Calls | Where-Object { $_ -match '^GET .*/jobSchedules(?:/[^?]+)?\?' -and $_ -notlike '*?api-version=2023-11-01' }).Count | Should -Be 0
+  }
+
+  It 'finishes the real postprovision wrapper and setup with custom metadata and observed empty-parameter shapes without a validation job' {
+    # Retain the actual Setup-PostDeploy script. -Wrapper would replace it with a stub.
+    Set-UpgradeCustomMetadata
+    $fixture = $global:upgradeFixture
+    $fixture.Values.AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION = 'false'
+    $fixture.Values.WEB_APP_ENABLED = 'false'
+    $fixture.Values.INCLUDE_WEB_APP = 'false'
+    $fixture.Values.WEB_APP_NAME = ''
+    $fixture.Values.AZURE_RBAC_SCOPES = ''
+    foreach ($name in @(
+      'EASY_AUTH_ENTRA_APP_OBJECT_ID', 'EASY_AUTH_ENTRA_APP_CLIENT_ID', 'EASY_AUTH_ENTRA_APP_DISPLAY_NAME',
+      'SETUP_EXCHANGE_STATUS', 'SETUP_TEAMS_STATUS', 'SETUP_AZURE_STATUS',
+      'EXO_APPROLE_ASSIGNMENT_IDS', 'TEAMS_READER_ROLE_ASSIGNMENT_IDS', 'AZURE_ROLE_ASSIGNMENT_IDS', 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME'
+    )) { $fixture.Values.Remove($name) }
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $beforeList = $fixture.JobList | ConvertTo-Json -Depth 30 -Compress
+    $beforeExact = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+    $beforeSchedule = $fixture.Schedule | ConvertTo-Json -Depth 30 -Compress
+
+    Invoke-UpgradeWrapper
+    Invoke-UpgradeWrapper
+
+    Assert-UpgradeNoWrites
+    $fixture.SetupCalls | Should -Be 0
+    $fixture.ExactJobReads | Should -Be 2
+    $fixture.RunbookInventoryResponses.Count | Should -Be 6
+    foreach ($response in $fixture.RunbookInventoryResponses) {
+      $response.value[0].properties.PSObject.Properties['runtimeEnvironment'] | Should -BeNullOrEmpty
+    }
+    ($fixture.Calls -join '|') | Should -Match 'GET [^|]*/runbooks/maester-runbook\?api-version=2024-10-23'
+    $summaryPath = Join-Path $fixture.Root 'outputs/test-setup-summary.md'
+    Test-Path -LiteralPath $summaryPath | Should -BeTrue
+    $summary = Get-Content -LiteralPath $summaryPath -Raw
+    $summary | Should -Match 'Deployment and Validation Summary'
+    $summary | Should -Match 'Preserve existing access: true'
+    $summary | Should -Match 'Deployment mode: quick'
+    $summary | Should -Match 'Include web app: false'
+    $summary | Should -Match 'Web App: not deployed'
+    $summary | Should -Match 'Exchange setup status: n/a'
+    $summary | Should -Match 'Teams setup status: n/a'
+    $summary | Should -Match 'Azure setup status: n/a'
+    $summary | Should -Match 'Exchange appRoleAssignment ids: n/a'
+    $summary | Should -Match 'Easy Auth Entra app objectId: n/a'
+    $summary | Should -Match 'Automation Account: aa-test'
+    $fixture.Account.tags.solution | Should -BeExactly 'Reviewed custom deployment'
+    $summary | Should -Match 'Runbook validation status: Skipped'
+    $summary | Should -Match 'Runbook final status: Skipped'
+    $summary | Should -Match 'Runbook job id: n/a'
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.JobList | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeList
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeExact
+    ($fixture.Schedule | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeSchedule
+  }
+
+  It 'preserves <ListShape>/<ExactShape> empty parameters with <RuntimePath> across the complete hook' -ForEach @(
+    @{ ListShape = 'null'; ExactShape = '{}'; RuntimePath = 'already-bound runtime'; Unbound = $false },
+    @{ ListShape = '{}'; ExactShape = 'null'; RuntimePath = 'already-bound runtime'; Unbound = $false },
+    @{ ListShape = 'null'; ExactShape = 'null'; RuntimePath = 'already-bound runtime'; Unbound = $false },
+    @{ ListShape = '{}'; ExactShape = '{}'; RuntimePath = 'already-bound runtime'; Unbound = $false },
+    @{ ListShape = 'missing'; ExactShape = 'missing'; RuntimePath = 'already-bound runtime'; Unbound = $false },
+    @{ ListShape = 'null'; ExactShape = '{}'; RuntimePath = 'one runtime PATCH'; Unbound = $true },
+    @{ ListShape = '{}'; ExactShape = 'null'; RuntimePath = 'one runtime PATCH'; Unbound = $true },
+    @{ ListShape = 'missing'; ExactShape = 'missing'; RuntimePath = 'one runtime PATCH'; Unbound = $true }
+  ) {
+    $fixture = $global:upgradeFixture
+    Set-UpgradeJobParameters -Job $fixture.Job -Json $ListShape
+    Set-UpgradeJobParameters -Job $fixture.ReadbackJob -Json $ExactShape
+    if ($Unbound) { Set-UpgradeRuntimeVersion -Version '7.6' -Unbound }
+    $beforeList = $fixture.JobList | ConvertTo-Json -Depth 30 -Compress
+    $beforeExact = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+
+    Invoke-UpgradeSetup
+    Invoke-UpgradeSetup
+
+    if ($Unbound) { Assert-UpgradeRuntimePatchOnly; $fixture.RuntimePatchAttempts | Should -Be 1 }
+    else { Assert-UpgradeNoWrites }
+    $fixture.ExactJobReads | Should -Be 2
+    ($fixture.JobList | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeList
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeExact
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+  }
+
+  It 'accepts only null/empty list serialization changes at <Stage>: <Initial> to <Next>' -ForEach @(
+    @{ Initial = 'null'; Next = '{}'; Exact = '{}'; Stage = 'pre-PATCH inventory'; Read = 2 },
+    @{ Initial = '{}'; Next = 'null'; Exact = 'null'; Stage = 'pre-PATCH inventory'; Read = 2 },
+    @{ Initial = 'null'; Next = '{}'; Exact = '{}'; Stage = 'final inventory'; Read = 3 },
+    @{ Initial = '{}'; Next = 'null'; Exact = 'null'; Stage = 'final inventory'; Read = 3 }
+  ) {
+    $fixture = $global:upgradeFixture
+    Set-UpgradeJobParameters -Job $fixture.Job -Json $Initial
+    Set-UpgradeJobParameters -Job $fixture.ReadbackJob -Json $Exact
+    Set-UpgradeRuntimeVersion -Version '7.6' -Unbound
+    $fixture.NextListParameterShape = $Next
+    $fixture.NextListParameterRead = $Read
+    $fixture.BeforeJobListRead = {
+      param($response, $f)
+      if ($f.InventoryReads -eq $f.NextListParameterRead) { Set-UpgradeJobParameters -Job $response.value[0] -Json $f.NextListParameterShape }
+    }
+    $beforeList = $fixture.JobList | ConvertTo-Json -Depth 30 -Compress
+    $beforeExact = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+
+    Invoke-UpgradeSetup
+
+    Assert-UpgradeRuntimePatchOnly
+    $fixture.RuntimePatchAttempts | Should -Be 1
+    ($fixture.JobList | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeList
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeExact
+  }
+
+  It 'rejects final-list-only <Problem> before accepting an unchanged exact association response' -ForEach @(
+    @{ Problem = 'nonempty parameter addition' }, @{ Problem = 'missing parameter property' },
+    @{ Problem = 'scalar parameters' }, @{ Problem = 'runOn null versus empty' },
+    @{ Problem = 'other property addition' }
+  ) {
+    $fixture = $global:upgradeFixture
+    $fixture.FinalListProblem = $Problem
+    $fixture.BeforeJobListRead = {
+      param($response, $f)
+      if ($f.InventoryReads -ne 3) { return }
+      $job = $response.value[0]
+      switch ($f.FinalListProblem) {
+        'nonempty parameter addition' { Set-UpgradeJobParameters -Job $job -Json '{"AddedParameter":"drift"}' }
+        'missing parameter property' { Set-UpgradeJobParameters -Job $job -Json 'missing' }
+        'scalar parameters' { Set-UpgradeJobParameters -Job $job -Json 'false' }
+        'runOn null versus empty' { $job.properties.runOn = '' }
+        'other property addition' { $job.properties | Add-Member -NotePropertyName futureProperty -NotePropertyValue 'drift' }
+      }
+    }
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $beforeList = $fixture.JobList | ConvertTo-Json -Depth 30 -Compress
+    $beforeExact = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+
+    { Invoke-UpgradeSetup } | Should -Throw '*association*'
+
+    Assert-UpgradeNoWrites
+    $fixture.InventoryReads | Should -Be 3
+    $fixture.ExactJobReads | Should -Be 0
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.JobList | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeList
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeExact
+  }
+
+  It 'rejects <Problem> between list and exact association parameters without writes' -ForEach @(
+    @{ Problem = 'missing versus null'; ListJson = 'missing'; ExactJson = 'null' },
+    @{ Problem = 'null versus missing'; ListJson = 'null'; ExactJson = 'missing' },
+    @{ Problem = 'missing versus empty object'; ListJson = 'missing'; ExactJson = '{}' },
+    @{ Problem = 'empty object versus missing'; ListJson = '{}'; ExactJson = 'missing' },
+    @{ Problem = 'nonempty parameter loss'; ListJson = '{"ExistingParameter":"retained"}'; ExactJson = '{}' },
+    @{ Problem = 'nonempty parameter loss to null'; ListJson = '{"ExistingParameter":"retained"}'; ExactJson = 'null' },
+    @{ Problem = 'nonempty parameter change'; ListJson = '{"ExistingParameter":"retained"}'; ExactJson = '{"ExistingParameter":"changed"}' },
+    @{ Problem = 'nonempty parameter addition'; ListJson = '{}'; ExactJson = '{"ExistingParameter":"added"}' },
+    @{ Problem = 'nested null removal'; ListJson = '{"Config":{"Nested":null}}'; ExactJson = '{"Config":{}}' },
+    @{ Problem = 'nested null versus empty string'; ListJson = '{"Config":{"Nested":null}}'; ExactJson = '{"Config":{"Nested":""}}' },
+    @{ Problem = 'nested boolean versus string'; ListJson = '{"Config":{"Nested":false}}'; ExactJson = '{"Config":{"Nested":"false"}}' },
+    @{ Problem = 'nested number versus string'; ListJson = '{"Config":{"Nested":1}}'; ExactJson = '{"Config":{"Nested":"1"}}' }
+  ) {
+    $fixture = $global:upgradeFixture
+    Set-UpgradeJobParameters -Job $fixture.Job -Json $ListJson
+    Set-UpgradeJobParameters -Job $fixture.ReadbackJob -Json $ExactJson
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    $beforeList = $fixture.JobList | ConvertTo-Json -Depth 30 -Compress
+    $beforeExact = $fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress
+
+    { Invoke-UpgradeSetup } | Should -Throw '*association properties changed*'
+
+    Assert-UpgradeNoWrites
+    $fixture.ExactJobReads | Should -Be 1
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+    ($fixture.JobList | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeList
+    ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeExact
+  }
+
+  It 'rejects malformed <Json> association parameters in the <Response> response without writes' -ForEach @(
+    @{ Json = '""'; Response = 'list' }, @{ Json = '"value"'; Response = 'list' },
+    @{ Json = 'false'; Response = 'list' }, @{ Json = '0'; Response = 'list' },
+    @{ Json = '[]'; Response = 'list' }, @{ Json = '[{}]'; Response = 'list' },
+    @{ Json = '""'; Response = 'exact' }, @{ Json = '"value"'; Response = 'exact' },
+    @{ Json = 'false'; Response = 'exact' }, @{ Json = '0'; Response = 'exact' },
+    @{ Json = '[]'; Response = 'exact' }, @{ Json = '[{}]'; Response = 'exact' }
+  ) {
+    $fixture = $global:upgradeFixture
+    $job = if ($Response -eq 'list') { $fixture.Job } else { $fixture.ReadbackJob }
+    Set-UpgradeJobParameters -Job $job -Json $Json
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    { Invoke-UpgradeSetup } | Should -Throw '*parameters*'
+    Assert-UpgradeNoWrites
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
+  }
+
+  It 'retains exact nonparameter association fields on readback: <Problem>' -ForEach @(
+    @{ Problem = 'runOn null versus empty string' }, @{ Problem = 'runOn missing versus null' },
+    @{ Problem = 'runOn worker versus null' }, @{ Problem = 'runbook linkage' },
+    @{ Problem = 'schedule linkage' }, @{ Problem = 'replacement GUID' },
+    @{ Problem = 'other property addition' }, @{ Problem = 'other property null removal' }
+  ) {
+    $fixture = $global:upgradeFixture
+    switch ($Problem) {
+      'runOn null versus empty string' { $fixture.ReadbackJob.properties.runOn = '' }
+      'runOn missing versus null' { $fixture.Job.properties.PSObject.Properties.Remove('runOn') }
+      'runOn worker versus null' { $fixture.Job.properties.runOn = 'existing-hybrid-worker' }
+      'runbook linkage' { $fixture.ReadbackJob.properties.runbook.name = 'another-runbook' }
+      'schedule linkage' { $fixture.ReadbackJob.properties.schedule.name = 'another-schedule' }
+      'replacement GUID' { $fixture.ReadbackJob.properties.jobScheduleId = '44444444-4444-4444-8444-444444444444' }
+      'other property addition' { $fixture.ReadbackJob.properties | Add-Member -NotePropertyName futureProperty -NotePropertyValue 'drift' }
+      'other property null removal' { $fixture.Job.properties | Add-Member -NotePropertyName futureProperty -NotePropertyValue $null }
+    }
+    $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
+    { Invoke-UpgradeSetup } | Should -Throw
+    Assert-UpgradeNoWrites
+    $fixture.ExactJobReads | Should -Be 1
+    ($fixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeValues
   }
 
   It 'binds existing PowerShell <Version> using only runtime PATCH and skips an already-bound repeat' -ForEach @(
@@ -344,8 +657,10 @@ Describe 'Existing upgrade postdeployment preservation' {
     @{ Problem = 'runbook state' }, @{ Problem = 'published content' }, @{ Problem = 'runtime binding' },
     @{ Problem = 'description' }, @{ Problem = 'tags' }, @{ Problem = 'logging' },
     @{ Problem = 'association parameters' }, @{ Problem = 'association runOn' },
-    @{ Problem = 'schedule state' }, @{ Problem = 'schedule timing' }
+    @{ Problem = 'schedule state' }, @{ Problem = 'schedule timing' },
+    @{ Problem = 'schedule next run' }, @{ Problem = 'schedule advanced null' }, @{ Problem = 'schedule offset' }
   ) {
+    Set-UpgradeRawJobSchedule
     Set-UpgradeRuntimeVersion -Version '7.6' -Unbound
     $fixture = $global:upgradeFixture
     $beforeValues = $fixture.Values | ConvertTo-Json -Depth 30 -Compress
@@ -360,6 +675,9 @@ Describe 'Existing upgrade postdeployment preservation' {
       'association runOn' { { param($f) $f.Job.properties.runOn = 'changed after PATCH' } }
       'schedule state' { { param($f) $f.Schedule.properties.isEnabled = $true } }
       'schedule timing' { { param($f) $f.Schedule.properties.interval = 1 } }
+      'schedule next run' { { param($f) $f.Schedule.properties.nextRun = '2026-11-04T01:23:00Z' } }
+      'schedule advanced null' { { param($f) $f.Schedule.properties.advancedSchedule.monthDays = @() } }
+      'schedule offset' { { param($f) $f.Schedule.properties.nextRunOffsetMinutes = 0 } }
     }
     { Invoke-UpgradeSetup } | Should -Throw
     Assert-UpgradeRuntimePatchOnly
@@ -604,6 +922,7 @@ Describe 'Existing upgrade postdeployment preservation' {
   }
 
   It 'publishes changed local content before runtime PATCH once while the existing association remains GET-only on repeated runs' {
+    Set-UpgradeRawJobSchedule
     Set-UpgradeRuntimeVersion -Version '7.6' -Unbound
     $global:upgradeFixture.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'false'
     $global:upgradeFixture.Values.WEB_APP_ENABLED = 'false'
@@ -728,13 +1047,14 @@ Describe 'Existing upgrade postdeployment preservation' {
   }
 
   It 'accepts reordered association and parameter keys from the exact readback' {
+    Set-UpgradeRawJobSchedule
     $job = $global:upgradeFixture.Job
     $global:upgradeFixture.ReadbackJob = [pscustomobject]@{
-      id = $job.id; name = $job.name; type = $job.type
+      id = $job.id
       properties = [ordered]@{
         runOn = $job.properties.runOn
         parameters = [ordered]@{ ExistingParameter = 'retained'; IncludeAzure = 'false' }
-        runbook = @{ name = 'maester-runbook' }; schedule = @{ name = 'maester-weekly-sunday' }; jobScheduleId = $job.name
+        runbook = @{ name = 'maester-runbook' }; schedule = @{ name = 'maester-weekly-sunday' }; jobScheduleId = $job.properties.jobScheduleId
       }
     }
     { Invoke-UpgradeSetup } | Should -Not -Throw
@@ -743,12 +1063,13 @@ Describe 'Existing upgrade postdeployment preservation' {
 
   It 'rejects a wrong-scope association readback before recording any receipt' {
     $global:upgradeFixture.ReadbackJob = $global:upgradeFixture.Job | ConvertTo-Json -Depth 30 | ConvertFrom-Json
-    $global:upgradeFixture.ReadbackJob.id = '/subscriptions/other/resourceGroups/other/providers/Microsoft.Automation/automationAccounts/other/jobSchedules/' + $global:upgradeFixture.Job.name
+    $global:upgradeFixture.ReadbackJob.id = '/subscriptions/other/resourceGroups/other/providers/Microsoft.Automation/automationAccounts/other/jobSchedules/' + $global:upgradeFixture.Job.properties.jobScheduleId
     { Invoke-UpgradeSetup } | Should -Throw '*readback does not match its exact ID*'
     ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
   }
 
   It 'rejects real association property changes detected on readback' -ForEach @('parameters', 'runOn') {
+    Set-UpgradeRawJobSchedule
     $global:upgradeFixture.ReadbackJob = $global:upgradeFixture.Job | ConvertTo-Json -Depth 30 | ConvertFrom-Json
     if ($_ -eq 'runOn') { $global:upgradeFixture.ReadbackJob.properties.runOn = 'changed-worker' }
     else { $global:upgradeFixture.ReadbackJob.properties.parameters.ExistingParameter = 'changed-parameter' }
@@ -769,7 +1090,7 @@ Describe 'Existing upgrade postdeployment preservation' {
     $associationIndex = $global:upgradeFixture.Calls.FindIndex([Predicate[string]]{ param($call) $call -match '^PUT .*/jobSchedules/' })
     $publishIndex | Should -BeGreaterThan 0
     $publishIndex | Should -BeLessThan $associationIndex
-    $global:upgradeFixture.Values.AUTOMATION_OWNED_JOB_SCHEDULE_ID | Should -Be $global:upgradeFixture.Job.name
+    $global:upgradeFixture.Values.AUTOMATION_OWNED_JOB_SCHEDULE_ID | Should -Be $global:upgradeFixture.Job.properties.jobScheduleId
     $global:upgradeFixture.Values.AUTOMATION_EXISTING_RESOURCES | Should -Be 'true'
     Invoke-UpgradeSetup
     @($global:upgradeFixture.Calls | Where-Object { $_ -match '^PUT .*/jobSchedules/' }).Count | Should -Be 1

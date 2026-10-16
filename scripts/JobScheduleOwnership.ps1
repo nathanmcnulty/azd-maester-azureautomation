@@ -369,6 +369,29 @@ function ConvertTo-MaesterCanonicalJson {
   return ConvertTo-Json -InputObject (ConvertTo-CanonicalValue $Value) -Depth 100 -Compress
 }
 
+function ConvertTo-MaesterJobSchedulePropertiesJson {
+  param([Parameter(Mandatory)]$Properties)
+
+  # Observed GET/list responses use {} and null for no supplied parameters.
+  # Copy only the outer bag: never alter raw evidence or nested parameter values.
+  $copy = [ordered]@{}
+  if ($Properties -is [System.Collections.IDictionary]) {
+    foreach ($key in $Properties.Keys) { $copy[$key] = $Properties[$key] }
+  }
+  elseif ($Properties -is [pscustomobject]) {
+    foreach ($property in $Properties.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+  }
+  else { throw 'Automation association properties must be an object.' }
+  if ($copy.Contains('parameters')) {
+    $parameters = $copy['parameters']
+    if ($null -eq $parameters) { $copy['parameters'] = @{} }
+    elseif ($parameters -isnot [System.Collections.IDictionary] -and $parameters -isnot [pscustomobject]) {
+      throw 'Automation association parameters must be an object or null.'
+    }
+  }
+  return ConvertTo-MaesterCanonicalJson $copy
+}
+
 function Update-MaesterExistingRunbookRuntime {
   [CmdletBinding()]
   param(
