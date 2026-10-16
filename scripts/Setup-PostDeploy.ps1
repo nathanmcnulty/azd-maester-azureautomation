@@ -196,30 +196,6 @@ $ownershipParameters = @{
   AdoptJobScheduleId = [string]$deploymentValues['AUTOMATION_ADOPT_JOB_SCHEDULE_ID']
 }
 
-function ConvertTo-MaesterCanonicalJson {
-  param([AllowNull()]$Value)
-  function ConvertTo-CanonicalValue {
-    param([AllowNull()]$Item)
-    if ($null -eq $Item) { return $null }
-    if ($Item -is [System.Collections.IDictionary]) {
-      $ordered = [ordered]@{}
-      foreach ($key in @($Item.Keys | Sort-Object)) { $ordered[$key] = ConvertTo-CanonicalValue $Item[$key] }
-      return $ordered
-    }
-    if ($Item -is [pscustomobject]) {
-      $ordered = [ordered]@{}
-      foreach ($property in @($Item.PSObject.Properties | Sort-Object Name)) { $ordered[$property.Name] = ConvertTo-CanonicalValue $property.Value }
-      return $ordered
-    }
-    if ($Item -is [System.Collections.IList]) {
-      $items = @(foreach ($element in $Item) { ConvertTo-CanonicalValue $element })
-      return ,$items
-    }
-    return $Item
-  }
-  return ConvertTo-Json -InputObject (ConvertTo-CanonicalValue $Value) -Depth 100 -Compress
-}
-
 function Get-MaesterPostDeployAutomationState {
   # Never interpret an unreadable, malformed, or truncated inventory as absence.
   $account = Resolve-MaesterMainDeploymentTarget -EnvironmentValues $deploymentValues `
@@ -257,6 +233,9 @@ $initialAutomationState = Get-MaesterPostDeployAutomationState
 $existingAutomationResources = [bool]$initialAutomationState.Resources.Existing
 $originalAssociationProperties = if ($existingAutomationResources) {
   ConvertTo-MaesterCanonicalJson $initialAutomationState.Resources.JobSchedule.properties
+} else { $null }
+$originalScheduleProperties = if ($existingAutomationResources) {
+  ConvertTo-MaesterCanonicalJson $initialAutomationState.Resources.Schedule.properties
 } else { $null }
 if ($null -ne $existingResourcesValue -and
     (($existingResourcesValue -eq 'true') -ne $existingAutomationResources)) {
@@ -816,11 +795,46 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 if (-not $publishedLocalRunbook) { throw 'Local Maester runbook publication was not confirmed; weekly schedule was not attached.' }
 
+# Existing runbooks are deliberately absent from ARM: a PUT can create an Edit
+# draft even without content. Rebind only through the documented direct PATCH,
+# after fresh exact ownership/linkage and published/local content verification.
+if ($existingAutomationResources) {
+  $beforeRuntimeState = Get-MaesterPostDeployAutomationState
+  if (-not $beforeRuntimeState.Resources.Existing -or
+      (ConvertTo-MaesterCanonicalJson $beforeRuntimeState.Resources.JobSchedule.properties) -cne $originalAssociationProperties -or
+      (ConvertTo-MaesterCanonicalJson $beforeRuntimeState.Resources.Schedule.properties) -cne $originalScheduleProperties) {
+    throw 'The existing Automation association or schedule changed before the runtime PATCH.'
+  }
+  Update-MaesterExistingRunbookRuntime -ExpectedAccountId $expectedAutomationAccountId `
+    -ExpectedRuntimeName $deploymentValues['automationRuntimeEnvironmentName'] `
+    -ExpectedRuntimeVersion $deploymentValues['automationRuntimeEnvironmentVersion'] `
+    -ExpectedContent $runbookContent -GetResource {
+      param($path)
+      Invoke-RestMethod -Method GET -Uri "https://management.azure.com$path" -Headers $armHeaders
+    } -GetContent {
+      param($path)
+      Invoke-RestMethod -Method GET -Uri "https://management.azure.com$path" -Headers $armHeaders
+    } -PatchResource {
+      param($path, $body)
+      Invoke-RestMethod -Method PATCH -Uri "https://management.azure.com$path" -Headers $armHeaders -Body $body -ContentType 'application/json'
+    } | Out-Null
+}
+
 # Re-read all children after publication, before touching any association. Existing
 # associations are read back only, retaining custom parameters, runOn, and IDs.
 $finalAutomationState = Get-MaesterPostDeployAutomationState
 if ([bool]$finalAutomationState.Resources.Existing -ne $existingAutomationResources) {
   throw 'The Automation association changed during postdeployment; refusing to recreate or overwrite it.'
+}
+if ($existingAutomationResources) {
+  $finalRuntime = $finalAutomationState.Resources.Runbook.properties.runtimeEnvironment
+  if ($finalRuntime -isnot [string] -or $finalRuntime -ine $deploymentValues['automationRuntimeEnvironmentName']) {
+    throw 'The existing runbook runtime binding changed during final postdeployment readback.'
+  }
+}
+if ($existingAutomationResources -and
+    (ConvertTo-MaesterCanonicalJson $finalAutomationState.Resources.Schedule.properties) -cne $originalScheduleProperties) {
+  throw 'The existing Automation schedule properties changed during postdeployment.'
 }
 $liveAccount = $finalAutomationState.Account
 $jobScheduleUri = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Automation/automationAccounts/$automationAccountName/jobSchedules/$jobScheduleId`?api-version=2023-11-01"

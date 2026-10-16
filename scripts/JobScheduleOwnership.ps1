@@ -310,8 +310,8 @@ function Get-MaesterRunbookPreservationMetadata {
     throw 'The fresh runbook metadata has no valid location.'
   }
 
-  # Only writable metadata is replayed. Content, draft, state, parameters,
-  # timestamps and other response-only fields must never enter the ARM request.
+  # Snapshot mutable metadata for comparison; content/state/runtime are checked
+  # separately. Draft, parameters, timestamps and read-only fields are never replayed.
   $metadata = [ordered]@{ location = $Runbook['location']; properties = [ordered]@{} }
   foreach ($name in @('description', 'logProgress', 'logVerbose', 'logActivityTrace')) {
     if (-not $properties.Contains($name)) { continue }
@@ -343,4 +343,100 @@ function Get-MaesterRunbookPreservationMetadata {
     }
   }
   return $metadata
+}
+
+function ConvertTo-MaesterCanonicalJson {
+  param([AllowNull()]$Value)
+  function ConvertTo-CanonicalValue {
+    param([AllowNull()]$Item)
+    if ($null -eq $Item) { return $null }
+    if ($Item -is [System.Collections.IDictionary]) {
+      $ordered = [ordered]@{}
+      foreach ($key in @($Item.Keys | Sort-Object)) { $ordered[$key] = ConvertTo-CanonicalValue $Item[$key] }
+      return $ordered
+    }
+    if ($Item -is [pscustomobject]) {
+      $ordered = [ordered]@{}
+      foreach ($property in @($Item.PSObject.Properties | Sort-Object Name)) { $ordered[$property.Name] = ConvertTo-CanonicalValue $property.Value }
+      return $ordered
+    }
+    if ($Item -is [System.Collections.IList]) {
+      $items = @(foreach ($element in $Item) { ConvertTo-CanonicalValue $element })
+      return ,$items
+    }
+    return $Item
+  }
+  return ConvertTo-Json -InputObject (ConvertTo-CanonicalValue $Value) -Depth 100 -Compress
+}
+
+function Update-MaesterExistingRunbookRuntime {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$ExpectedAccountId,
+    [Parameter(Mandatory)]$ExpectedRuntimeName,
+    [Parameter(Mandatory)]$ExpectedRuntimeVersion,
+    [Parameter(Mandatory)][string]$ExpectedContent,
+    [Parameter(Mandatory)][scriptblock]$GetResource,
+    [Parameter(Mandatory)][scriptblock]$GetContent,
+    [Parameter(Mandatory)][scriptblock]$PatchResource
+  )
+
+  # These selected-environment outputs come from the declared runtime resource,
+  # never from an ambient override or the runbook's current binding.
+  if ($ExpectedRuntimeName -isnot [string] -or $ExpectedRuntimeVersion -isnot [string] -or
+      $ExpectedRuntimeVersion -cnotmatch '^[0-9]+\.[0-9]+$' -or
+      $ExpectedRuntimeName -cne "PowerShell-$($ExpectedRuntimeVersion.Replace('.', ''))-Maester") {
+    throw 'The deployment runtime name/version outputs are missing or inconsistent.'
+  }
+  $runtimeId = "$ExpectedAccountId/runtimeEnvironments/$ExpectedRuntimeName"
+  $runtime = & $GetResource "$runtimeId`?api-version=2024-10-23"
+  $runtimeRecord = $runtime | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+  $runtimeProperties = if ($runtimeRecord -is [System.Collections.IDictionary]) { $runtimeRecord['properties'] } else { $null }
+  $definition = if ($runtimeProperties -is [System.Collections.IDictionary]) { $runtimeProperties['runtime'] } else { $null }
+  if ($definition -isnot [System.Collections.IDictionary] -or
+      [string]$runtimeRecord['id'] -ine $runtimeId -or [string]$runtimeRecord['name'] -ine $ExpectedRuntimeName -or
+      [string]$runtimeRecord['type'] -ine 'Microsoft.Automation/automationAccounts/runtimeEnvironments' -or
+      $definition['language'] -isnot [string] -or $definition['language'] -cne 'PowerShell' -or
+      $definition['version'] -isnot [string] -or $definition['version'] -cne $ExpectedRuntimeVersion) {
+    throw 'The exact deployment runtime does not match its account, name, type, language, and version.'
+  }
+
+  $runbookPath = "$ExpectedAccountId/runbooks/maester-runbook?api-version=2024-10-23"
+  $contentPath = "$ExpectedAccountId/runbooks/maester-runbook/content?api-version=2024-10-23"
+  $before = & $GetResource $runbookPath
+  $beforeRecord = $before | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+  $beforeMetadata = Get-MaesterRunbookPreservationMetadata -ExpectedAccountId $ExpectedAccountId -Runbook $beforeRecord
+  $currentRuntime = $beforeRecord['properties']['runtimeEnvironment']
+  if ($currentRuntime -isnot [string] -or [string]::IsNullOrWhiteSpace($currentRuntime)) {
+    throw 'The existing runbook has no verified scalar runtime binding before PATCH.'
+  }
+  $expected = $ExpectedContent.TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+  $published = & $GetContent $contentPath
+  if ($published -isnot [string] -or [string]::IsNullOrWhiteSpace($published) -or
+      $published.TrimStart([char]0xFEFF).Replace("`r`n", "`n") -cne $expected) {
+    throw 'Published/local runbook content differs before the runtime PATCH.'
+  }
+  if ($currentRuntime -ieq $ExpectedRuntimeName) {
+    Write-Host "Existing runbook is already bound to '$ExpectedRuntimeName'; runtime PATCH was skipped."
+    return $false
+  }
+
+  # Use the documented direct update route instead of create-or-update PUT.
+  # Readback must prove preservation; never upload or publish a draft here.
+  Write-Host "Updating existing runbook runtime '$currentRuntime' to '$ExpectedRuntimeName'."
+  $body = @{ properties = @{ runtimeEnvironment = $ExpectedRuntimeName } } | ConvertTo-Json -Depth 3 -Compress
+  & $PatchResource $runbookPath $body | Out-Null
+  $after = & $GetResource $runbookPath
+  $afterRecord = $after | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+  $afterMetadata = Get-MaesterRunbookPreservationMetadata -ExpectedAccountId $ExpectedAccountId -Runbook $afterRecord
+  $afterContent = & $GetContent $contentPath
+  if ($afterRecord['properties']['runtimeEnvironment'] -isnot [string] -or
+      $afterRecord['properties']['runtimeEnvironment'] -ine $ExpectedRuntimeName -or
+      (ConvertTo-MaesterCanonicalJson $afterMetadata) -cne (ConvertTo-MaesterCanonicalJson $beforeMetadata) -or
+      $afterContent -isnot [string] -or
+      $afterContent.TrimStart([char]0xFEFF).Replace("`r`n", "`n") -cne $expected) {
+    throw 'The runtime PATCH did not preserve the published runbook content, metadata, and expected binding.'
+  }
+  Write-Host "Verified existing runbook runtime binding '$ExpectedRuntimeName' with published content and metadata unchanged."
+  return $true
 }

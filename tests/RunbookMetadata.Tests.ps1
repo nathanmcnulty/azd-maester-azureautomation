@@ -22,7 +22,7 @@ BeforeAll {
   }
 }
 
-Describe 'Writable existing runbook metadata projection' {
+Describe 'Verified existing runbook metadata snapshot' {
   It 'preserves exact mutable values while excluding content, draft and response-only fields' {
     $runbook = New-RunbookMetadataFixture
     $before = $runbook | ConvertTo-Json -Depth 10 -Compress

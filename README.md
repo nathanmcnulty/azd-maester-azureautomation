@@ -49,7 +49,7 @@ You can optionally enable additional data collection/connectivity for Maester by
 
 ### Existing deployment upgrades
 
-See [upgrade preservation](docs/upgrade-preservation.md) for live-verified schedule/runbook preservation, the explicit runtime-only access-preservation mode, validation-job controls, and the required live acceptance/rollback gate.
+See [upgrade preservation](docs/upgrade-preservation.md) for freshly verified schedule/runbook targets and preservation, the explicit runtime-only access-preservation mode, validation-job controls, and the required live acceptance/rollback gate.
 
 ### Permission behavior
 

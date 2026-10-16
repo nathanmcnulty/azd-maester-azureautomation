@@ -88,30 +88,12 @@ param jobScheduleId string = newGuid()
 @allowed(['true', 'false'])
 param existingAutomationResourcesOption string = 'false'
 
-@description('Fresh live-verified mutable metadata for the existing Maester runbook. Set only by preprovision after exact resource identity and ownership checks.')
-param existingRunbookMetadataJson string = '{}'
-
 @description('Bounded existing-deployment runtime-only upgrade. Leaves non-runtime infrastructure and all access settings untouched.')
 @allowed(['true', 'false'])
 param preserveUpgradeAccessOption string = 'false'
 
 var existingAutomationResources = existingAutomationResourcesOption == 'true'
 var preserveUpgradeAccess = preserveUpgradeAccessOption == 'true'
-var preserveExistingRunbook = existingAutomationResources || preserveUpgradeAccess
-// Required location/properties reads fail closed if an existing deployment lacks
-// the preprovision snapshot. Fresh deployments never parse a stale snapshot.
-var existingRunbookMetadata = preserveExistingRunbook ? json(existingRunbookMetadataJson) : {
-  location: location
-  properties: {}
-}
-// Replay only mutable metadata. Never merge arbitrary GET response properties.
-var preservedRunbookProperties = union(
-  contains(existingRunbookMetadata.properties, 'description') ? { description: existingRunbookMetadata.properties.description } : {},
-  contains(existingRunbookMetadata.properties, 'logProgress') ? { logProgress: existingRunbookMetadata.properties.logProgress } : {},
-  contains(existingRunbookMetadata.properties, 'logVerbose') ? { logVerbose: existingRunbookMetadata.properties.logVerbose } : {},
-  contains(existingRunbookMetadata.properties, 'logActivityTrace') ? { logActivityTrace: existingRunbookMetadata.properties.logActivityTrace } : {}
-)
-
 // Standardized parameters and tags for consistency with function-app and container-app-job
 var automationAccountName = 'aa-${toLower(environmentName)}'
 var scheduleName = 'maester-weekly-sunday'
@@ -416,15 +398,15 @@ resource runtimePackageMicrosoftTeams 'Microsoft.Automation/automationAccounts/r
   }
 }
 
-resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' = {
+// Existing runbooks are rebound with a runtime-only PATCH after ownership checks.
+// A create-or-update PUT can reset omitted metadata or replace published content.
+resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' = if (!existingAutomationResources && !preserveUpgradeAccess) {
   name: runbookName
   parent: automationTarget
-  location: preserveExistingRunbook ? existingRunbookMetadata.location : location
-  tags: preserveExistingRunbook ? existingRunbookMetadata.?tags : null
-  properties: union({
+  location: location
+  properties: {
     runbookType: 'PowerShell'
     runtimeEnvironment: runtime74.name
-  }, preserveExistingRunbook ? preservedRunbookProperties : {
     logProgress: true
     logVerbose: false
     description: 'Runbook to execute Maester report workflow'
@@ -432,7 +414,7 @@ resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2024-10-23' =
       uri: 'https://raw.githubusercontent.com/maester365/maester/c657a4b8a24267ccd795edb0c7db402e0d440e3b/powershell/public/Invoke-Maester.ps1'
       contentHash: { algorithm: 'sha256', value: 'FF70CB4AB2F32ADA6C5FF5121931D3C8BE45BDBCDB746970C26FB275FFAD312F' }
     }
-  })
+  }
   dependsOn: [
     runtimePackageAzAccounts
     runtimePackageMaester
@@ -552,6 +534,8 @@ resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01'
   }
 }
 
+output automationRuntimeEnvironmentName string = runtime74.name
+output automationRuntimeEnvironmentVersion string = runtime74.properties.runtime.version
 output automationAccountName string = automationTarget.name
 output jobScheduleId string = jobScheduleId
 output automationPrincipalId string = preserveUpgradeAccess ? automationTarget.identity.principalId : automationAccount!.identity.principalId
