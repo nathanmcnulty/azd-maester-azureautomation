@@ -50,6 +50,11 @@ if ([string]::IsNullOrWhiteSpace($SubscriptionId) -or $selectedValues['AZURE_SUB
 }
 if ([string]::IsNullOrWhiteSpace($location)) { $location = [string]$selectedValues['AZURE_LOCATION'] }
 $aaName = "aa-$($EnvironmentName.ToLower())"
+$expectedSolutionTag = Resolve-MaesterPreservationSolutionTag -EnvironmentValues $selectedValues -SubscriptionId $SubscriptionId `
+  -ResourceGroupName $rgName -EnvironmentName $EnvironmentName
+$explicitSolutionTag = Resolve-MaesterUpgradeControlValue -EnvironmentValues $selectedValues -Name 'AUTOMATION_ADOPT_SOLUTION_TAG'
+$solutionTagComparer = if (-not [string]::IsNullOrEmpty($explicitSolutionTag)) { [StringComparer]::Ordinal } else { [StringComparer]::OrdinalIgnoreCase }
+
 $priorOwnership = @(@('AUTOMATION_OWNED_ACCOUNT_ID', 'AUTOMATION_OWNED_PRINCIPAL_ID', 'AUTOMATION_OWNED_JOB_SCHEDULE_ID',
   'AUTOMATION_ADOPT_ACCOUNT_ID', 'AUTOMATION_ADOPT_PRINCIPAL_ID', 'AUTOMATION_ADOPT_JOB_SCHEDULE_ID') |
   Where-Object { -not [string]::IsNullOrWhiteSpace([string]$selectedValues[$_]) })
@@ -90,7 +95,7 @@ if ($resourceGroupExists -and $matchingAccounts.Count -eq 1) {
   if ($account.id -ine $expectedAccountId -or $account.name -ine $aaName -or
       $account.type -ine 'Microsoft.Automation/automationAccounts' -or
       -not $account.tags -or $account.tags.workload -ine 'maester' -or
-      $account.tags.solution -ine 'automation-account' -or
+      -not $solutionTagComparer.Equals([string]$account.tags.solution, $expectedSolutionTag) -or
       $account.tags.environment -ine $EnvironmentName -or $account.tags.managedBy -ine 'azd') {
     throw 'The exact Automation account does not match the template deployment target.'
   }

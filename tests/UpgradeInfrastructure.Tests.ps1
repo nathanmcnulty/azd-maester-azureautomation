@@ -108,6 +108,7 @@ BeforeAll {
           [IO.File]::WriteAllText($outputPath, (Get-Content (Join-Path $PSScriptRoot '../scripts/Invoke-MaesterAutomationRunbook.ps1') -Raw))
           return
         }
+        if ($command -like '*resourceGroups/rg-test?api-version=2021-04-01*') { return (@{ id = '/subscriptions/sub-test/resourceGroups/rg-test'; name = 'rg-test'; type = 'Microsoft.Resources/resourceGroups' } | ConvertTo-Json -Compress) }
         $kind = if ($command -match '/(jobSchedules|schedules|runbooks)\?') { $Matches[1] }
           elseif ($command -match '/automationAccounts\?') { 'accounts' } else { 'account' }
         if ($global:maesterUpgradeScenario.FailKind -eq $kind) { $global:LASTEXITCODE = 1; return '' }
@@ -118,7 +119,7 @@ BeforeAll {
       & (Join-Path $PSScriptRoot '../scripts/Run-AzdPreProvision.ps1')
     }
     finally {
-      foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+      foreach ($name in $names) { if ($null -eq $saved[$name]) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($name, $saved[$name]) } }
       $global:LASTEXITCODE = 0
       Remove-Variable maesterUpgradeScenario -Scope Global -ErrorAction SilentlyContinue
     }
@@ -283,15 +284,15 @@ Describe 'Preprovision preservation decision uses readable complete live invento
   It 'verifies exact storage and account outputs before enabling bounded runtime-only preservation' {
     $scenario = New-UpgradePreProvisionScenario
     $scenario.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'true'
-    $scenario.Values.STORAGE_ACCOUNT_NAME = 'stmaestertest'
+    $scenario.Values.STORAGE_ACCOUNT_NAME = 'stmaestero7scshewul3pm'
     $scenario.Values.WEB_APP_ENABLED = 'false'; $scenario.Values.INCLUDE_WEB_APP = 'false'
     $scenario.Values.automationAccountName = 'aa-test'; $scenario.Values.automationPrincipalId = $script:upgradePrincipalId
-    $storageId = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestertest'
-    $scenario.ExtraResources[$storageId] = [pscustomobject]@{ id = $storageId; name = 'stmaestertest'; type = 'Microsoft.Storage/storageAccounts'; tags = $scenario.Account.tags }
+    $storageId = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestero7scshewul3pm'
+    $scenario.ExtraResources[$storageId] = [pscustomobject]@{ id = $storageId; name = 'stmaestero7scshewul3pm'; type = 'Microsoft.Storage/storageAccounts'; tags = $scenario.Account.tags }
     $before = $scenario | ConvertTo-Json -Depth 30 -Compress
     Invoke-UpgradePreProvision -Scenario $scenario
     ($global:maesterUpgradeCalls -join '|') | Should -Match 'azd env set -e test AUTOMATION_UPGRADE_PRESERVE_ACCESS true'
-    ($global:maesterUpgradeCalls -join '|') | Should -Match 'storageAccounts/stmaestertest\?'
+    ($global:maesterUpgradeCalls -join '|') | Should -Match 'storageAccounts/stmaestero7scshewul3pm\?'
     ($global:maesterUpgradeCalls -join '|') | Should -Not -Match 'DELETE|--method PUT|lock delete'
     ($scenario | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $before
   }

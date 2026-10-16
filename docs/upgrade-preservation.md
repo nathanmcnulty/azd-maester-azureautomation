@@ -22,6 +22,14 @@ azd env set AUTOMATION_UPGRADE_PRESERVE_ACCESS false
 
 `AUTOMATION_EXISTING_RESOURCES` is a derived preprovision value, not a user-supplied adoption mechanism. It is refreshed from live reads and advances after a successful first association. Conflicting process and selected-environment controls fail rather than silently changing mode.
 
+## Explicitly adopted custom metadata
+
+A deployment whose `solution` tag was explicitly customized can use `AUTOMATION_ADOPT_SOLUTION_TAG` to state the exact expected value. This is accepted only in runtime-only preservation mode and only with a complete selected-environment ownership receipt or explicit account/principal/jobSchedule adoption triplet. Every stage rechecks the live account identity and association; a flag or matching tag alone never establishes ownership. No historical alias is assumed, no tag is inferred from the live resource, and no resource is retagged. Canonical fresh/full provisioning still requires `automation-account`. Clear the explicit tag before returning to that flow.
+
+Preservation preflight also verifies the exact resource-group identity and evaluates the template's deterministic storage/Web App names locally using the existing Bicep CLI. `STORAGE_ACCOUNT_NAME`, and `WEB_APP_NAME` when enabled, must match those targets. The Automation `StorageAccountName` variable is an externally configured report destination; it is left unchanged and cannot supply deployment ownership or replace missing outputs.
+
+This local evaluation requires an already installed Bicep CLI supporting `using none` (0.31.0 or newer). Set `BICEP_EXE`, put the executable on PATH, or use Azure CLI's existing Bicep installation. The hook never installs a tool or invokes Azure to evaluate the naming expression. It isolates compiler inputs from inherited parameter overrides, preserves the exact ARM resource-group ID casing, and fails closed when evaluation or output verification fails.
+
 ## Explicit validation-job control
 
 Normal deployments retain the existing default of running validation. A local override takes precedence over the shared wizard's `VALIDATE_RUNBOOK_ON_PROVISION` setting:

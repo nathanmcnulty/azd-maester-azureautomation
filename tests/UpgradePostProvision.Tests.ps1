@@ -5,7 +5,7 @@ BeforeAll {
     $root = Join-Path $TestDrive ([guid]::NewGuid().ToString())
     $scripts = Join-Path $root 'scripts'
     New-Item -ItemType Directory -Path (Join-Path $scripts 'vendor/Azd.MaesterHooks') -Force | Out-Null
-    foreach ($name in @('Setup-PostDeploy.ps1', 'Run-AzdPostProvision.ps1', 'Resolve-DeploymentTargets.ps1', 'JobScheduleOwnership.ps1')) {
+    foreach ($name in @('Setup-PostDeploy.ps1', 'Run-AzdPostProvision.ps1', 'Resolve-DeploymentTargets.ps1', 'JobScheduleOwnership.ps1', 'PreservationMetadata.ps1', 'Resolve-AutomationStorageTarget.ps1')) {
       Copy-Item (Join-Path $script:repoRoot "scripts/$name") (Join-Path $scripts $name)
     }
     $localContent = "# locally maintained runbook`nWrite-Output 'local'`n"
@@ -40,7 +40,7 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     $runbook = [pscustomobject]@{ id = "$accountId/runbooks/maester-runbook"; name = 'maester-runbook'; type = 'Microsoft.Automation/automationAccounts/runbooks'; properties = @{ state = 'Published'; runbookType = 'PowerShell' } }
     $values = @{
       AZURE_ENV_NAME = 'test'; AZURE_SUBSCRIPTION_ID = '11111111-1111-4111-8111-111111111111'; AZURE_RESOURCE_GROUP = 'rg-test'
-      automationAccountName = 'aa-exact-output'; automationPrincipalId = $principal; STORAGE_ACCOUNT_NAME = 'stmaester123'; WEB_APP_ENABLED = 'true'; WEB_APP_NAME = 'app-maester'
+      automationAccountName = 'aa-exact-output'; automationPrincipalId = $principal; STORAGE_ACCOUNT_NAME = 'stmaester6cykv256tyq6q'; WEB_APP_ENABLED = 'true'; WEB_APP_NAME = 'app-maester-6cykv256tyq6q'
       AUTOMATION_JOB_SCHEDULE_ID = $jobId; AUTOMATION_OWNED_ACCOUNT_ID = $accountId; AUTOMATION_OWNED_PRINCIPAL_ID = $principal; AUTOMATION_OWNED_JOB_SCHEDULE_ID = $jobId
       AUTOMATION_EXISTING_RESOURCES = 'true'; AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'true'; AUTOMATION_MI_PRINCIPAL_ID = $principal
       SETUP_EXCHANGE_STATUS = 'configured'; SETUP_TEAMS_STATUS = 'configured'; SETUP_AZURE_STATUS = 'configured'
@@ -51,8 +51,9 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     $global:upgradeFixture = @{
       Root = $root; Scripts = $scripts; Values = $values; Account = $account; Job = $job; Schedule = $schedule; Runbook = $runbook
       JobList = [pscustomobject]@{ value = @($job) }; ScheduleList = [pscustomobject]@{ value = @($schedule) }; RunbookList = [pscustomobject]@{ value = @($runbook) }
-      Storage = [pscustomobject]@{ id = "$scope/providers/Microsoft.Storage/storageAccounts/stmaester123"; name = 'stmaester123'; type = 'Microsoft.Storage/storageAccounts'; tags = $tags }
-      WebApp = [pscustomobject]@{ id = "$scope/providers/Microsoft.Web/sites/app-maester"; name = 'app-maester'; type = 'Microsoft.Web/sites'; kind = 'app'; tags = $tags; properties = @{ defaultHostName = 'app-maester.azurewebsites.net'; serverFarmId = '' } }
+      Group = [pscustomobject]@{ id = $scope; name = 'rg-test'; type = 'Microsoft.Resources/resourceGroups' }
+      Storage = [pscustomobject]@{ id = "$scope/providers/Microsoft.Storage/storageAccounts/stmaester6cykv256tyq6q"; name = 'stmaester6cykv256tyq6q'; type = 'Microsoft.Storage/storageAccounts'; tags = $tags }
+      WebApp = [pscustomobject]@{ id = "$scope/providers/Microsoft.Web/sites/app-maester-6cykv256tyq6q"; name = 'app-maester-6cykv256tyq6q'; type = 'Microsoft.Web/sites'; kind = 'app'; tags = $tags; properties = @{ defaultHostName = 'app-maester-6cykv256tyq6q.azurewebsites.net'; serverFarmId = '' } }
       LocalContent = $localContent; PublishedContent = $localContent; Draft = ''; Calls = [Collections.Generic.List[string]]::new()
       SetupCalls = 0; ValidationCalls = 0; GraphGrantCalls = 0; FailPublication = $false; DisappearOnFinalRead = $false; InventoryReads = 0; ReadbackJob = $null
     }
@@ -69,6 +70,17 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
   function Grant-ServicePrincipalAppRoleAssignment { }
   function Test-DirectoryRoleAssignment { }
   function Test-AzureReaderRoleAssignment { }
+  function Set-UpgradeCustomMetadata {
+    $fixture = $global:upgradeFixture
+    $oldId = $fixture.Account.id
+    $newId = $oldId -replace '/aa-exact-output$', '/aa-test'
+    $fixture.Account.id = $newId; $fixture.Account.name = 'aa-test'
+    foreach ($item in @($fixture.Job, $fixture.Schedule, $fixture.Runbook)) { $item.id = $item.id.Replace($oldId, $newId) }
+    $fixture.Values.automationAccountName = 'aa-test'
+    $fixture.Values.AUTOMATION_OWNED_ACCOUNT_ID = $newId
+    $fixture.Values.AUTOMATION_ADOPT_SOLUTION_TAG = 'Reviewed custom deployment'
+    $fixture.Account.tags.solution = 'Reviewed custom deployment'
+  }
   function Invoke-UpgradeSetup {
     & (Join-Path $global:upgradeFixture.Scripts 'Setup-PostDeploy.ps1') -SubscriptionId $global:upgradeFixture.Values.AZURE_SUBSCRIPTION_ID -EnvironmentName test -ResourceGroupName rg-test -TenantId tenant-test
   }
@@ -81,7 +93,7 @@ Describe 'Existing upgrade postdeployment preservation' {
   BeforeEach {
     $script:savedLocation = Get-Location
     $script:savedEnvironment = @{}
-    foreach ($name in @('AZURE_ENV_NAME', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION', 'INCLUDE_EXCHANGE', 'INCLUDE_TEAMS', 'INCLUDE_AZURE')) {
+    foreach ($name in @('AZURE_ENV_NAME', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION', 'AUTOMATION_ADOPT_SOLUTION_TAG', 'INCLUDE_EXCHANGE', 'INCLUDE_TEAMS', 'INCLUDE_AZURE')) {
       $script:savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
       Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
@@ -116,6 +128,7 @@ Describe 'Existing upgrade postdeployment preservation' {
         throw "Unexpected mutation: $Method $Uri"
       }
       if ($path -eq "https://management.azure.com$($fixture.Account.id)") { return $fixture.Account }
+      if ($path -eq "https://management.azure.com$($fixture.Group.id)") { return $fixture.Group }
       if ($path -eq "https://management.azure.com$($fixture.Storage.id)") { return $fixture.Storage }
       if ($path -eq "https://management.azure.com$($fixture.WebApp.id)") { return $fixture.WebApp }
       if ($path -like '*/jobSchedules') {
@@ -337,6 +350,77 @@ Describe 'Existing upgrade postdeployment preservation' {
     $global:upgradeFixture.Values.AUTOMATION_EXISTING_RESOURCES | Should -Be 'true'
     Invoke-UpgradeSetup
     @($global:upgradeFixture.Calls | Where-Object { $_ -match '^PUT .*/jobSchedules/' }).Count | Should -Be 1
+  }
+
+  It 'preserves explicitly bound custom metadata without rewriting tags variables or receipts' {
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.Values.runtimevariableStorageAccountName = 'external-report-sink'
+    $before = $global:upgradeFixture.Values | ConvertTo-Json -Depth 30 -Compress
+    Invoke-UpgradeSetup
+    ($global:upgradeFixture.Values | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $before
+    $global:upgradeFixture.Account.tags.solution | Should -BeExactly 'Reviewed custom deployment'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'rejects a custom live tag with only the preservation flag and no explicit expected metadata' {
+    $global:upgradeFixture.Account.tags.solution = 'Reviewed custom deployment'
+    { Invoke-UpgradeSetup } | Should -Throw '*exact subscription*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'rejects explicit custom metadata outside preservation mode' {
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'false'
+    { Invoke-UpgradeSetup } | Should -Throw '*requires AUTOMATION_UPGRADE_PRESERVE_ACCESS=true*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'rejects incomplete custom metadata ownership before any write' {
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.Values.Remove('AUTOMATION_OWNED_PRINCIPAL_ID')
+    { Invoke-UpgradeSetup } | Should -Throw '*incomplete*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'rejects structurally valid custom metadata with the wrong live principal' {
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.Values.AUTOMATION_OWNED_PRINCIPAL_ID = '55555555-5555-4555-8555-555555555555'
+    { Invoke-UpgradeSetup } | Should -Throw '*receipt does not match the live account*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'rejects custom metadata when its selected live association disappeared or is ambiguous' {
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.JobList = [pscustomobject]@{ value = @() }
+    { Invoke-UpgradeSetup } | Should -Throw '*disappeared*'
+    $global:upgradeFixture.JobList = [pscustomobject]@{ value = @($global:upgradeFixture.Job, $global:upgradeFixture.Job) }
+    { Invoke-UpgradeSetup } | Should -Throw '*More than one*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'retains all non-solution account checks for custom metadata: <Field>' -ForEach @(
+    @{ Field = 'environment'; Value = 'other' }, @{ Field = 'workload'; Value = 'other' }, @{ Field = 'managedBy'; Value = 'other' }
+  ) {
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.Account.tags = $global:upgradeFixture.Account.tags.Clone()
+    $global:upgradeFixture.Account.tags[$Field] = $Value
+    { Invoke-UpgradeSetup } | Should -Throw '*scope, tags, and managed identity*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'rejects misleading deployment storage even when the runtime data-sink variable names a real external account' {
+    $global:upgradeFixture.Values.STORAGE_ACCOUNT_NAME = 'externalreportsink'
+    $global:upgradeFixture.Values.runtimevariableStorageAccountName = 'externalreportsink'
+    { Invoke-UpgradeSetup } | Should -Throw '*deterministic main.bicep storage target*'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+  }
+
+  It 'enforces custom metadata live ownership again in postprovision before a validation job' {
+    Import-UpgradeFixture -Wrapper
+    Set-UpgradeCustomMetadata
+    $global:upgradeFixture.Values.AUTOMATION_OWNED_PRINCIPAL_ID = '55555555-5555-4555-8555-555555555555'
+    { Invoke-UpgradeWrapper } | Should -Throw '*receipt does not match the live account*'
+    $global:upgradeFixture.ValidationCalls | Should -Be 0
   }
 
   It 'starts one explicitly enabled validation and none on the next disabled upgrade' {

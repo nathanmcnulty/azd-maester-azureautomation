@@ -11,7 +11,7 @@ BeforeAll {
 
   function Invoke-OfflinePreProvision {
     param([hashtable]$Scenario)
-    $names = @('AZURE_ENV_NAME', 'AZURE_SUBSCRIPTION_ID', 'AZURE_TENANT_ID', 'AZURE_LOCATION', 'AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION')
+    $names = @('AZURE_ENV_NAME', 'AZURE_SUBSCRIPTION_ID', 'AZURE_TENANT_ID', 'AZURE_LOCATION', 'AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION', 'AUTOMATION_ADOPT_SOLUTION_TAG')
     $saved = @{}
     foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
     try {
@@ -19,9 +19,9 @@ BeforeAll {
       $env:AZURE_SUBSCRIPTION_ID = 'sub-test'
       $env:AZURE_TENANT_ID = 'tenant-test'
       $env:AZURE_LOCATION = 'westus'
-      $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS = $null
-      $env:AUTOMATION_EXISTING_RESOURCES = $null
-      $env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION = $null
+      Remove-Item Env:AUTOMATION_UPGRADE_PRESERVE_ACCESS -ErrorAction SilentlyContinue
+      Remove-Item Env:AUTOMATION_EXISTING_RESOURCES -ErrorAction SilentlyContinue
+      Remove-Item Env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION -ErrorAction SilentlyContinue
       if ($Scenario.ContainsKey('ProcessValues')) { foreach ($key in $Scenario.ProcessValues.Keys) { [Environment]::SetEnvironmentVariable($key, $Scenario.ProcessValues[$key]) } }
       $global:maesterOfflineScenario = $Scenario
       $global:maesterOfflineScenario.LocalContent = Get-Content (Join-Path (Split-Path $script:hookPath) 'Invoke-MaesterAutomationRunbook.ps1') -Raw
@@ -52,7 +52,8 @@ BeforeAll {
             return
           }
           if ($global:maesterOfflineScenario.ContainsKey('UnreadableKind') -and $command -like "*/$($global:maesterOfflineScenario.UnreadableKind)?*") { $global:LASTEXITCODE = 1; return '' }
-          if ($command -like '*Microsoft.Storage/storageAccounts/stmaestertest?*') { return ($global:maesterOfflineScenario.Storage | ConvertTo-Json -Depth 12 -Compress) }
+          if ($command -like '*resourceGroups/rg-test?api-version=2021-04-01*') { return (@{ id = '/subscriptions/sub-test/resourceGroups/rg-test'; name = 'rg-test'; type = 'Microsoft.Resources/resourceGroups' } | ConvertTo-Json -Compress) }
+          if ($command -like '*Microsoft.Storage/storageAccounts/stmaestero7scshewul3pm?*') { return ($global:maesterOfflineScenario.Storage | ConvertTo-Json -Depth 12 -Compress) }
           if ($command -like '*/schedules?*') { return ($global:maesterOfflineScenario.Schedules | ConvertTo-Json -Depth 12 -Compress) }
           if ($command -like '*/runbooks?*') { return ($global:maesterOfflineScenario.Runbooks | ConvertTo-Json -Depth 12 -Compress) }
           if ($command -like '*/jobSchedules?*') { return ($global:maesterOfflineScenario.ScheduleList | ConvertTo-Json -Depth 12 -Compress) }
@@ -64,7 +65,7 @@ BeforeAll {
       & $script:hookPath
     }
     finally {
-      foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+      foreach ($name in $names) { if ($null -eq $saved[$name]) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($name, $saved[$name]) } }
       $global:LASTEXITCODE = 0
     }
   }
@@ -272,15 +273,15 @@ Describe 'Upgrade preservation preprovision discovery' {
 
   It 'requires exact existing output targets for the runtime-only deployment mode' {
     $script:scenario.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'true'
-    $script:scenario.Values.STORAGE_ACCOUNT_NAME = 'stmaestertest'
+    $script:scenario.Values.STORAGE_ACCOUNT_NAME = 'stmaestero7scshewul3pm'
     $script:scenario.Values.WEB_APP_ENABLED = 'false'
     $script:scenario.Values.INCLUDE_WEB_APP = 'false'
     $script:scenario.Values.automationAccountName = 'aa-test'
     $script:scenario.Values.automationPrincipalId = $script:principalId
-    $script:scenario.Storage = @{ id = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestertest'; name = 'stmaestertest'; type = 'Microsoft.Storage/storageAccounts'; tags = @{ workload = 'maester'; solution = 'automation-account'; environment = 'test'; managedBy = 'azd' } }
+    $script:scenario.Storage = @{ id = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestero7scshewul3pm'; name = 'stmaestero7scshewul3pm'; type = 'Microsoft.Storage/storageAccounts'; tags = @{ workload = 'maester'; solution = 'automation-account'; environment = 'test'; managedBy = 'azd' } }
     Invoke-OfflinePreProvision -Scenario $script:scenario
     ($global:maesterOfflineCalls -join '|') | Should -Match 'AUTOMATION_UPGRADE_PRESERVE_ACCESS true'
-    $script:scenario.Storage.id = '/subscriptions/other/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestertest'
+    $script:scenario.Storage.id = '/subscriptions/other/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestero7scshewul3pm'
     { Invoke-OfflinePreProvision -Scenario $script:scenario } | Should -Throw '*exact subscription*'
     ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|DELETE'
   }
@@ -289,7 +290,7 @@ Describe 'Upgrade preservation preprovision discovery' {
 
 Describe 'Upgrade flag provenance' {
   It 'rejects either process/environment control mismatch before writing derived flags' {
-    foreach ($name in @('AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION')) {
+    foreach ($name in @('AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION', 'AUTOMATION_ADOPT_SOLUTION_TAG')) {
       foreach ($selected in @('true', 'false')) {
         $scenario = New-OfflineScenario -GroupExists 'false'
         $scenario.Values[$name] = $selected
@@ -309,12 +310,12 @@ Describe 'Runtime-only script authorization boundary' {
     $script:contentScenario.Values.AUTOMATION_OWNED_PRINCIPAL_ID = $script:principalId
     $script:contentScenario.Values.AUTOMATION_OWNED_JOB_SCHEDULE_ID = $script:scheduleId
     $script:contentScenario.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'true'
-    $script:contentScenario.Values.STORAGE_ACCOUNT_NAME = 'stmaestertest'
+    $script:contentScenario.Values.STORAGE_ACCOUNT_NAME = 'stmaestero7scshewul3pm'
     $script:contentScenario.Values.WEB_APP_ENABLED = 'false'
     $script:contentScenario.Values.INCLUDE_WEB_APP = 'false'
     $script:contentScenario.Values.automationAccountName = 'aa-test'
     $script:contentScenario.Values.automationPrincipalId = $script:principalId
-    $script:contentScenario.Storage = @{ id = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestertest'; name = 'stmaestertest'; type = 'Microsoft.Storage/storageAccounts'; tags = @{ workload = 'maester'; solution = 'automation-account'; environment = 'test'; managedBy = 'azd' } }
+    $script:contentScenario.Storage = @{ id = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestero7scshewul3pm'; name = 'stmaestero7scshewul3pm'; type = 'Microsoft.Storage/storageAccounts'; tags = @{ workload = 'maester'; solution = 'automation-account'; environment = 'test'; managedBy = 'azd' } }
   }
 
   It 'rejects different published workflow bytes before ARM flags or other writes' {
@@ -340,5 +341,43 @@ Describe 'Runtime-only script authorization boundary' {
     $script:contentScenario.PublishedContent = [string][char]0xFEFF + $localContent.Replace("`n", "`r`n")
     Invoke-OfflinePreProvision -Scenario $script:contentScenario
     ($global:maesterOfflineCalls -join '|') | Should -Match 'AUTOMATION_UPGRADE_PRESERVE_ACCESS true'
+  }
+}
+
+
+Describe 'Explicit custom metadata preprovision binding' {
+  BeforeEach {
+    $script:customScenario = New-OfflineScenario
+    $v = $script:customScenario.Values
+    $v.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'true'
+    $v.AUTOMATION_ADOPT_SOLUTION_TAG = 'Reviewed custom deployment'
+    $v.AUTOMATION_OWNED_ACCOUNT_ID = $script:accountId
+    $v.AUTOMATION_OWNED_PRINCIPAL_ID = $script:principalId
+    $v.AUTOMATION_OWNED_JOB_SCHEDULE_ID = $script:scheduleId
+    $v.STORAGE_ACCOUNT_NAME = 'stmaestero7scshewul3pm'
+    $v.WEB_APP_ENABLED = 'false'; $v.INCLUDE_WEB_APP = 'false'
+    $v.automationAccountName = 'aa-test'; $v.automationPrincipalId = $script:principalId
+    $script:customScenario.Account.tags.solution = 'Reviewed custom deployment'
+    $script:customScenario.Storage = @{ id = '/subscriptions/sub-test/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/stmaestero7scshewul3pm'; name = 'stmaestero7scshewul3pm'; type = 'Microsoft.Storage/storageAccounts'; tags = @{ workload = 'maester'; solution = 'Reviewed custom deployment'; environment = 'test'; managedBy = 'azd' } }
+  }
+
+  It 'accepts explicitly bound custom metadata before ARM without retagging or fabricating a receipt' {
+    $beforeAccount = $script:customScenario.Account | ConvertTo-Json -Depth 20 -Compress
+    $beforeValues = $script:customScenario.Values | ConvertTo-Json -Depth 20 -Compress
+    Invoke-OfflinePreProvision -Scenario $script:customScenario
+    ($script:customScenario.Account | ConvertTo-Json -Depth 20 -Compress) | Should -BeExactly $beforeAccount
+    ($script:customScenario.Values | ConvertTo-Json -Depth 20 -Compress) | Should -BeExactly $beforeValues
+    ($global:maesterOfflineCalls -join '|') | Should -Match 'AUTOMATION_EXISTING_RESOURCES true'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'AUTOMATION_OWNED_|--method (PUT|PATCH|POST|DELETE)'
+  }
+
+  It 'rejects an unbound or wrong-case custom tag before any provision writes' {
+    $script:customScenario.Values.Remove('AUTOMATION_OWNED_PRINCIPAL_ID')
+    { Invoke-OfflinePreProvision -Scenario $script:customScenario } | Should -Throw '*incomplete*'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|PATCH|POST|DELETE)'
+    $script:customScenario.Values.AUTOMATION_OWNED_PRINCIPAL_ID = $script:principalId
+    $script:customScenario.Account.tags.solution = 'reviewed custom deployment'
+    { Invoke-OfflinePreProvision -Scenario $script:customScenario } | Should -Throw '*does not match the template deployment target*'
+    ($global:maesterOfflineCalls -join '|') | Should -Not -Match 'env set|--method (PUT|PATCH|POST|DELETE)'
   }
 }
