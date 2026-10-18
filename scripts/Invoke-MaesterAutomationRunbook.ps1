@@ -16,11 +16,21 @@ param(
   [string]$ExportContainer = 'archive',
 
   [Parameter(Mandatory = $false)]
-  [string]$DashboardContainer = 'latest'
+  [string]$DashboardContainer = 'latest',
+
+  # Boolean is supported by Automation job parameters; opt in explicitly.
+  [Parameter(Mandatory = $false)]
+  [bool]$RuntimeValidationOnly = $false
 )
 
 $ErrorActionPreference = 'Stop'
 $ConfirmPreference = 'None'
+
+# Also enforce at runtime: Automation hosts may not honor #Requires.
+if ($PSVersionTable.PSVersion -lt [version]'7.6' -or $PSVersionTable.PSEdition -ne 'Core' -or
+    [Environment]::Version.Major -lt 10) {
+  throw 'The maintained runbook requires PowerShell 7.6+ Core on .NET 10+.'
+}
 
 # Azure Automation currently accepts a package contentLink with an incorrect
 # contentHash. Verify the bytes again in the runbook before importing modules.
@@ -41,7 +51,8 @@ function Import-LockedRuntimeModule {
     [Parameter(Mandatory)][string]$Name,
     [Parameter(Mandatory)][hashtable]$PackageLock,
     [Parameter(Mandatory)][string]$DestinationRoot,
-    [string]$PackageDirectory
+    [string]$PackageDirectory,
+    [switch]$PassThru
   )
 
   if (-not $PackageLock.ContainsKey($Name)) { throw "Runtime package '$Name' is not locked." }
@@ -75,6 +86,7 @@ function Import-LockedRuntimeModule {
     throw
   }
   if (-not $PackageDirectory) { Remove-Item -LiteralPath $packagePath -Force }
+  if ($PassThru) { $imported }
 }
 
 $verifiedModuleRoot = Join-Path ([IO.Path]::GetTempPath()) "maester-verified-$([guid]::NewGuid().ToString('N'))"
@@ -185,8 +197,27 @@ function Publish-WebAppContent {
 
 Write-Output "Starting Maester automation runbook at $(Get-Date -Format 'u')"
 
-foreach ($name in @('NuGet', 'PackageManagement', 'PowerShellGet', 'Az.Accounts', 'Microsoft.Graph.Authentication', 'Pester', 'Maester')) {
-  Import-LockedRuntimeModule -Name $name -PackageLock $runtimePackages -DestinationRoot $verifiedModuleRoot
+$defaultModuleReceipts = @(foreach ($name in @('NuGet', 'PackageManagement', 'PowerShellGet', 'Az.Accounts', 'Microsoft.Graph.Authentication', 'Pester', 'Maester')) {
+  $module = Import-LockedRuntimeModule -Name $name -PackageLock $runtimePackages -DestinationRoot $verifiedModuleRoot -PassThru
+  [pscustomobject]@{
+    Name = $module.Name
+    Version = $module.Version.ToString()
+    Path = $module.Path
+    ModuleBase = $module.ModuleBase
+  }
+})
+
+if ($RuntimeValidationOnly) {
+  # JSON remains inspectable in Automation output streams. This attests only the
+  # seven verified default imports, never optional workloads or managed identity.
+  [pscustomobject]@{
+    Kind = 'Maester.RuntimeValidation'
+    SchemaVersion = 1
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    DotNetVersion = [Environment]::Version.ToString()
+    Modules = $defaultModuleReceipts
+  } | ConvertTo-Json -Depth 5 -Compress
+  return
 }
 
 Connect-AzAccount -Identity | Out-Null

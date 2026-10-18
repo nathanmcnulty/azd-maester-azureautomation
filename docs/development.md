@@ -47,3 +47,39 @@ unrelated CLI defaults and stale cached Enabled state. These checks supplement
 the preservation, locked-package, report, drift-isolation, and ownership suites.
 They do not authorize permission grants or substitute for Codex-owned native
 sub-mvp validation, runbook publication/access checks, or owned-resource cleanup.
+
+## Runtime-only runbook validation
+
+Issue #32 adds a default-off `RuntimeValidationOnly` Boolean to the maintained
+`Invoke-MaesterAutomationRunbook.ps1`. For an approved native bootstrap check,
+use the existing `Invoke-RunbookValidation.ps1` with the explicit
+`-RuntimeValidationOnly` switch and the same required target selectors. The helper
+still authenticates to the scoped ARM control plane and starts a real Automation
+job; the runbook itself stops before workload authentication.
+
+The helper submits `properties.parameters = {"RuntimeValidationOnly":"true"}`:
+the value is the string containing the JSON Boolean `true`, matching the
+[Azure PowerShell job parameter serializer](https://github.com/Azure/azure-powershell/blob/main/src/Automation/Automation/Common/AutomationPSClient.cs)
+and [Automation job API](https://learn.microsoft.com/en-us/rest/api/automation/job/create?view=rest-automation-2023-11-01).
+Omitting the switch, or supplying `-RuntimeValidationOnly:$false`, submits `{}`
+and preserves ordinary assessment behavior. For direct local invocation of the
+runbook, pass the actual Boolean `-RuntimeValidationOnly:$true`, not a string.
+
+After enforcing PowerShell 7.6+ Core / .NET 10+, the runbook follows its existing
+package download, SHA-256 verification, extraction and exact-path import flow.
+Only after all seven default imports succeed does this mode emit one compact JSON
+receipt (`Kind: Maester.RuntimeValidation`, schema 1) with actual PowerShell/.NET
+versions and each imported module's name, version, path and module base. The start
+message remains a separate output record. A missing package, bad hash or failed
+import throws without a success receipt. No Automation variables, identity
+connections, assessment, report publication or notification are reached.
+Exchange and Teams retain their separate optional gates and are not included in
+the receipt. All nine package locks remain unchanged.
+
+Offline tests execute the actual entrypoints using strict boundary stubs and tiny
+local package fixtures; these tests do not qualify real Gallery modules or Azure
+sandbox behavior. Native PowerShell 7.6 availability, published source/parameter
+binding, seven real package imports and receipt inspection remain Codex-owned
+sub-mvp gates. Managed identity, optional workloads, assessment, report access,
+retention/rollback and owned cleanup remain separate gates. This mode neither
+publishes changed runbook content nor bypasses the existing preservation contract.
