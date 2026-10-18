@@ -86,6 +86,8 @@ BeforeAll {
       $global:maesterUpgradeScenario = $Scenario
       $global:maesterUpgradeCalls = [Collections.Generic.List[string]]::new()
       function Import-Module { param([string]$Name, [switch]$Force) }
+      # Guard behavior is covered using real helpers in TargetGuardEntrypoints.Tests.ps1.
+      function Get-AzCliSubscriptionContext { param($SubscriptionId, $TenantId) [pscustomobject]@{ id = $SubscriptionId; tenantId = $TenantId; state = 'Enabled' } }
       function Invoke-MaesterPreProvision { param($SolutionName, $SubscriptionId, $TenantId, $Location) }
       function azd {
         $global:maesterUpgradeCalls.Add("azd $($args -join ' ')")

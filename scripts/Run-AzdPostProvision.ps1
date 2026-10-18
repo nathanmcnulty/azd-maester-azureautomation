@@ -81,6 +81,12 @@ if (-not $PSBoundParameters.ContainsKey('PermissionProfile') -and $env:PERMISSIO
   $PermissionProfile = $env:PERMISSION_PROFILE
 }
 
+if ([string]::IsNullOrWhiteSpace($TenantId)) {
+  throw 'TenantId is required. Pass -TenantId or set AZURE_TENANT_ID to the expected tenant.'
+}
+$targetContext = Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId
+$TenantId = $targetContext.tenantId
+
 # The shared wizard always writes VALIDATE_RUNBOOK_ON_PROVISION=true.
 # This local override allows an intentional single validation, followed by
 # repeat upgrades that do not start another Automation job.
@@ -190,7 +196,8 @@ if ($envValues.Count -gt 0) {
   if (-not [string]::IsNullOrWhiteSpace($exoSpDisplayNameValue)) { $exoServicePrincipalDisplayNameFromEnv = $exoSpDisplayNameValue }
 }
 
-$armToken = az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ --query accessToken -o tsv
+$armToken = Get-AzCliAccessToken -SubscriptionId $SubscriptionId -TenantId $TenantId -Resource 'https://management.azure.com/'
+if ([string]::IsNullOrWhiteSpace($armToken)) { throw 'ARM token acquisition failed for the validated target.' }
 $armHeaders = @{ Authorization = "Bearer $armToken" }
 $resourcesPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/resources?api-version=2021-04-01"
 $resourcesPayload = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$resourcesPath" -Headers $armHeaders

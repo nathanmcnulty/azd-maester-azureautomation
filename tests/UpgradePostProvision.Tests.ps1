@@ -130,6 +130,7 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
   function az { }
   function azd { }
   function Get-AzCliSubscriptionContext { }
+  function Get-AzCliAccessToken { }
   function ConvertTo-BoolOrDefault { param($Value, $Default) if ($Value) { return $Value -eq 'true' }; return $Default }
   function Invoke-GraphRestRequest { }
   function Connect-MgGraphSilent { }
@@ -233,6 +234,7 @@ Describe 'Existing upgrade postdeployment preservation' {
     Import-UpgradeFixture
     Mock Import-Module { }
     Mock Get-AzCliSubscriptionContext { [pscustomobject]@{ tenantId = 'tenant-test' } }
+    Mock Get-AzCliAccessToken { 'offline-arm-token' }
     Mock az {
       $global:upgradeFixture.Calls.Add("az $($args -join ' ')")
       if ($args[0] -ne 'account' -or $args[1] -ne 'get-access-token') { throw "Unexpected Azure CLI call: $args" }
