@@ -5,9 +5,9 @@
 
 - **Schema version:** 1.0.0
 - **Repository:** nathanmcnulty/azd-maester-azureautomation
-- **Source revision:** `f307d58aa2616c3eea2f23bf366e3bc25bbb081d`
-- **Captured:** 2026-10-07
-- **Items:** 7
+- **Source revision:** `5b0a8ad9c5a6ac2153b95ee1e596de5daa17ab71`
+- **Captured:** 2026-10-17
+- **Items:** 10
 
 ## MAUTO-001: Reconcile this backlog with current source and active work
 
@@ -173,6 +173,63 @@ The report captured on 2026-10-03 is closed after the reviewed fix merged; this 
 
 Review MAUTO-004 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
 
+## MAUTO-008: Enforce the PowerShell 7.6 and Pester 6.2 authoring baseline
+
+- **Kind:** maintenance
+- **Priority:** P1
+- **Status:** done
+- **Wave:** 1
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+The runtime upgrade selects PowerShell 7.6, but maintained scripts lacked a minimum-version guard and repository CI still selected Pester 5.7.1.
+
+**Scope:**
+
+- Owned scripts/&ast;.ps1 entry points
+- Repository validation workflow and developer guidance
+
+**Acceptance:**
+
+- Require PowerShell 7.6+ before owned script bodies execute; preserve immutable vendored sources and historical receipts.
+- Install and import exact Pester 6.2.0 in CI and document equivalent local validation.
+- Run the full offline suite on the supported baseline; retain separate live runtime/preservation gates.
+
+**Validation:**
+
+- Invoke-Pester -Path ./tests -CI with PowerShell 7.6+ and imported Pester 6.2.0
+- Parse all PowerShell and inspect ScriptRequirements for every owned script; verify permission evidence hashes and canonical backlog checks.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/issues/24
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/pull/26
+- docs/development.md
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/pull/28
+- https&colon;//github.com/nathanmcnulty/azd-maester-azureautomation/blob/c53cbe1e484fbf26e9834fe202783a934f849523/docs/backlog.json
+
+**Evidence:**
+
+- 2026-10-16&colon; Source follow-up based on runtime PR26 head 36804911c0ea8de8f301a6f4ec6ba995c8c55124. All nine owned scripts enforce PowerShell 7.6 before execution. Vendored scripts, runtime package locks and historical evidence are unchanged.
+- PowerShell 7.6.6 with actual Pester 6.2.0&colon; all 75 repository tests passed, zero failed or skipped. This is offline source evidence; it does not establish native runtime startup, runbook preservation or workload execution. Existing runtime/preservation PRs and live gates remain open.
+- Renumbered the authoring-baseline task to MAUTO-008 to preserve viewer tasks MAUTO-006/007 already allocated in reviewed pending preservation branch c53cbe1e484fbf26e9834fe202783a934f849523. Both original viewer records remain proposed and unchanged; this is metadata reconciliation, not viewer implementation or authorization.
+- 2026-10-17 reconciliation&colon; merged Automation origin/main 5b0a8ad9c5a6ac2153b95ee1e596de5daa17ab71 into the PS7.6 branch without adopting the separate azd-reference main candidate 3f88050. The current merged source has eleven maintained PowerShell entry/helper scripts, exact Pester 6.2 CI and the pinned Bicep preservation check; the full offline suite passed 582/582 on PowerShell 7.6.6 with BICEP&lowbar;EXE bound to the local v0.42.1 executable. Permission evidence was checked against current bytes and only the Setup-PostDeploy.ps1 hash required refresh; requirements and grants were unchanged.
+
+**Review and authorization note:**
+
+Review MAUTO-008 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
 ## MAUTO-003: Reconcile shared hook/webapp versions and host permission deltas
 
 - **Kind:** maintenance
@@ -287,6 +344,64 @@ Shared pilots are already vendored; host-specific execution and report access st
 
 Review MAUTO-002 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
 
+## MAUTO-009: Keep configuration drift disabled and isolated by default
+
+- **Kind:** maintenance
+- **Priority:** P1
+- **Status:** done
+- **Wave:** 3
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+Omitting DriftRoot leaves upstream Maester able to discover unapproved input from an inherited process environment variable.
+
+**Scope:**
+
+- scripts/Invoke-MaesterAutomationRunbook.ps1
+- tests/DriftIsolation.Tests.ps1
+- docs/drift-isolation.md
+- docs/backlog.json
+- docs/backlog.md
+
+**Acceptance:**
+
+- Exclude the locked upstream drift file before Pester discovery and clear its ambient environment during invocation, restoring prior process state on success and failure.
+- Preserve ordinary assessment, genuine findings, publication and failure semantics; do not enable drift, fetch data or add permissions.
+- Prove the original inherited-input defect and corrected isolation with exact production configuration/invocation tests plus actual locked suite/report qualification.
+
+**Validation:**
+
+- PowerShell 7.6+ and Pester 6.2&colon; Invoke-Pester ./tests -CI
+- Parse all PowerShell; canonical backlog schema/render checks; fixtures are not native job or publisher proof.
+
+**Dependencies:**
+
+- _none_
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- docs/drift-isolation.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/090001c61660d6522d2c5d4df6581af297015b35/docs/drift-analysis-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/2
+
+**Evidence:**
+
+- PowerShell 7.6.6/Pester 6.2.0 full repository validation passed 79/79 with zero nonpasses; parser and differential analyzer checks found no new supported-runtime issue. Three isolation regression cases fail against the original runner, and all four pass with the fix.
+- Actual offline locked Maester 2.2.0 Invoke-Maester qualification used this host production configuration/invocation blocks, an unchanged hash-verified upstream suite, one ordinary synthetic test and an inherited unapproved input folder. Exactly one ordinary test passed, drift stayed excluded, the inherited environment was restored, and no HTTP/authentication tripwire fired. Qualification supplies offline connection flags and invokes only assessment blocks; publisher paths are outside this check, and no native job, workload identity, Blob publication/access or cleanup outcome is claimed.
+- Default-disabled isolation only; MAUTO-010 retains the approved-input adapter, normalization/privacy and native qualification gates. Existing runtime/deployment validation evidence is preserved.
+- 2026-10-17 reconciliation&colon; default-disabled drift isolation now clears and restores MAESTER&lowbar;FOLDER&lowbar;DRIFT with PowerShell NullString semantics, preserving absent, empty and nonempty process states across success and throw. Drift regression coverage passed 5/5 and the full Pester 6.2 suite passed 582/582; locked Maester absent, empty and inherited qualifications each retained one ordinary assessment result with no HTTP/authentication activity. No collector, permission or live publication authority was added.
+
+**Review and authorization note:**
+
+Review MAUTO-009 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
 ## MAUTO-006: Implement optional Caddy Container App report viewer
 
 - **Kind:** feature
@@ -394,3 +509,58 @@ The shared viewer design is complete, but this standalone Automation runner has 
 **Review and authorization note:**
 
 Review MAUTO-007 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.
+
+## MAUTO-010: Implement approved data-only configuration drift inputs
+
+- **Kind:** feature
+- **Priority:** P2
+- **Status:** proposed
+- **Wave:** 4
+- **Authorization:** local-only
+- **Blocker:** _none_
+- **Claim:** _none_
+
+**Problem:**
+
+Upstream drift comparison exists, but this host has no approved artifact/target/privacy contract or live qualification.
+
+**Scope:**
+
+- scripts/Invoke-MaesterAutomationRunbook.ps1
+- tests/
+- docs/
+- azd-permissions.json
+
+**Acceptance:**
+
+- Follow the reviewed MCAT-011 design&colon; explicitly enabled data-only artifacts, immutable approved baseline, tenant/environment/run/source/hash/freshness binding, bounded JSON/path/link/duplicate validation and reviewed schemas, normalization and exclusions.
+- Use the actual locked upstream suite with expected positive case counts and fail on missing suite, zero cases, malformed/scalar/settings inputs, comparison errors and container failures; preserve default-off isolation and reused-process environment restoration.
+- Inspect actual HTML/JSON/Markdown/logs for planted sensitive values; preserve separate comparison, report and publication outcomes and rollback. Add no automatic capture, baseline update or remediation.
+- Independently review the adapter and qualify authorized native job execution, report access, rollback and exact owned cleanup; coordinate a second host before shared extraction.
+
+**Validation:**
+
+- PowerShell 7.6+/Pester 6.2 registered tests and actual locked suite/report fixtures.
+- Separate authorized native host/report/access/cleanup qualification; local metadata grants no live authority.
+
+**Dependencies:**
+
+- MAUTO-009
+
+**Components:**
+
+- _none_
+
+**Sources:**
+
+- docs/drift-isolation.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/blob/090001c61660d6522d2c5d4df6581af297015b35/docs/drift-analysis-design.md
+- https&colon;//github.com/nathanmcnulty/azd-maester/issues/2
+
+**Evidence:**
+
+- _none_
+
+**Review and authorization note:**
+
+Review MAUTO-010 against the current repository state. Its status or authorization class is not eligible for an actionable generated handoff. Do not claim or execute it without explicit selection, satisfied dependencies, and every required authorization. Never interpret this generated view as approval.

@@ -343,7 +343,8 @@ Describe 'Runtime-only script authorization boundary' {
 
   It 'accepts identical content with only BOM or CRLF differences before enabling runtime-only mode' {
     $localContent = Get-Content (Join-Path (Split-Path $script:hookPath) 'Invoke-MaesterAutomationRunbook.ps1') -Raw
-    $script:contentScenario.PublishedContent = [string][char]0xFEFF + $localContent.Replace("`n", "`r`n")
+    $normalizedLocalContent = $localContent.Replace("`r`n", "`n")
+    $script:contentScenario.PublishedContent = [string][char]0xFEFF + $normalizedLocalContent.Replace("`n", "`r`n")
     Invoke-OfflinePreProvision -Scenario $script:contentScenario
     ($global:maesterOfflineCalls -join '|') | Should -Match 'AUTOMATION_UPGRADE_PRESERVE_ACCESS true'
   }

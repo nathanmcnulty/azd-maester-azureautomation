@@ -7,6 +7,9 @@ Deploys a production-style Maester automation solution on Azure with:
 - Storage-backed report history (`archive`) and latest pointer (`latest/latest.html`)
 - Optional App Service + Easy Auth portal in WebApp mode
 
+Local setup and maintained scripts require **PowerShell 7.6 or newer**. See
+[development validation](docs/development.md) for the matching Pester baseline.
+
 ## Quickstart (recommended)
 
 After `azd init -t nathanmcnulty/azd-maester-azureautomation`, run from the template root:
@@ -153,3 +156,7 @@ This solution is reasonably secure, but there are additional controls you may ch
 - azd hooks/extensibility: https://learn.microsoft.com/azure/developer/azure-developer-cli/azd-extensibility
 - Manage azd environment variables: https://learn.microsoft.com/azure/developer/azure-developer-cli/manage-environment-variables
 - App Service custom domain: https://learn.microsoft.com/azure/app-service/app-service-web-tutorial-custom-domain
+
+Configuration drift remains disabled: the runner isolates inherited drift input
+from the ordinary assessment. See [drift isolation and remaining gates](docs/drift-isolation.md)
+(MAUTO-009 and MAUTO-010).

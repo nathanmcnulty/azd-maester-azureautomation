@@ -1,4 +1,5 @@
-﻿param(
+#Requires -Version 7.6
+param(
   [Parameter(Mandatory = $false)]
   [string]$StorageAccountName,
 
@@ -426,6 +427,10 @@ Write-Output "Using Maester test path: $testsPath"
 Write-Output "Running Invoke-Maester from test path '$testsPath'"
 
 $pesterConfig = [PesterConfiguration]@{
+  Run = @{
+    # Drift is not an enabled host feature; exclude it before discovery.
+    ExcludePath = @((Join-Path $testsPath 'Maester/Drift/MT1060Drift.tests.ps1'))
+  }
   TestRegistry = @{
     Enabled = $false
   }
@@ -444,7 +449,9 @@ if (-not [string]::IsNullOrWhiteSpace($MailRecipient)) {
   Write-Output "Email notifications enabled for recipient: $MailRecipient"
 }
 
+$previousDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
 try {
+  [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', [System.Management.Automation.Language.NullString]::Value, 'Process')
   $ErrorActionPreference = 'Continue'
   Invoke-Maester @maesterInvokeParameters
 }
@@ -453,6 +460,12 @@ catch {
 }
 finally {
   $ErrorActionPreference = 'Stop'
+  $restoreDriftRoot = if ($null -eq $previousDriftRoot) {
+    [System.Management.Automation.Language.NullString]::Value
+  } else {
+    $previousDriftRoot
+  }
+  [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', $restoreDriftRoot, 'Process')
 }
 Write-Output 'Invoke-Maester execution completed.'
 

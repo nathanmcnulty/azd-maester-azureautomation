@@ -1,3 +1,4 @@
+#Requires -Version 7.6
 . (Join-Path $PSScriptRoot 'PreservationMetadata.ps1')
 . (Join-Path $PSScriptRoot 'JobScheduleOwnership.ps1')
 . (Join-Path $PSScriptRoot 'Resolve-AutomationStorageTarget.ps1')
