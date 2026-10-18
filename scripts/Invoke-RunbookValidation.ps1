@@ -17,6 +17,8 @@ param(
 
   [int]$TimeoutMinutes = 20,
 
+  [switch]$RuntimeValidationOnly,
+
   [switch]$PassThru
 )
 
@@ -40,12 +42,19 @@ $apiVersion = '2023-11-01'
 $jobId = [guid]::NewGuid().ToString()
 $basePath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName"
 
+$jobParameters = @{}
+if ($RuntimeValidationOnly) {
+  # ARM job parameter values are strings containing JSON-serialized values.
+  # The service deserializes this to the runbook's Boolean, not string truthiness.
+  $jobParameters.RuntimeValidationOnly = ($true | ConvertTo-Json -Compress)
+}
+
 $jobBody = @{
   properties = @{
     runbook = @{
       name = $RunbookName
     }
-    parameters = @{}
+    parameters = $jobParameters
   }
 } | ConvertTo-Json -Depth 10 -Compress
 

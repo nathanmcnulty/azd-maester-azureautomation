@@ -7,13 +7,14 @@ BeforeAll {
   $script:guardTenant = '22222222-2222-4222-8222-222222222222'
   $script:guardOther = '99999999-9999-4999-8999-999999999999'
   function Invoke-GuardEntrypoint {
-    param([string]$Name, [switch]$WithoutTenant)
+    param([string]$Name, [switch]$WithoutTenant, [switch]$RuntimeValidationOnly)
     if ($Name -eq 'Run-AzdPreUp.ps1') { & (Join-Path $script:guardRepo "scripts/$Name"); return }
     $parameters = @{ SubscriptionId = $script:guardSub }
     if (-not $WithoutTenant) { $parameters.TenantId = $script:guardTenant }
     if ($Name -ne 'Run-AzdPreProvision.ps1') { $parameters.ResourceGroupName = 'rg-guard' }
     if ($Name -eq 'Invoke-RunbookValidation.ps1') {
       $parameters.AutomationAccountName = 'aa-guard'; $parameters.PassThru = $true
+      if ($PSBoundParameters.ContainsKey('RuntimeValidationOnly')) { $parameters.RuntimeValidationOnly = $RuntimeValidationOnly }
     } elseif ($Name -ne 'Run-AzdPreProvision.ps1') { $parameters.EnvironmentName = 'guard' }
     & (Join-Path $script:guardRepo "scripts/$Name") @parameters
   }
@@ -50,7 +51,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
       Values = @{ AZURE_ENV_NAME = 'guard'; AZURE_SUBSCRIPTION_ID = $script:guardSub; AZURE_TENANT_ID = $script:guardTenant; AZURE_RESOURCE_GROUP = 'rg-guard'; AZURE_LOCATION = 'westus2' }
       Cli = [Collections.Generic.List[string]]::new(); Writes = [Collections.Generic.List[string]]::new()
       Headers = [Collections.Generic.List[string]]::new(); Reads = [Collections.Generic.List[string]]::new(); Connects = [Collections.Generic.List[object]]::new()
-      Roles = 0; MetadataFailure = $false; TokenFailure = $false; AllowValidation = $false; AllowGroupCreate = $false; AllowSetup = $false; GraphGrants = 0; ExoTokenFault = ''; ServicePrincipals = 0
+      JobBodies = [Collections.Generic.List[string]]::new(); JobStatus = 'Completed'; JobException = ''; Roles = 0; MetadataFailure = $false; TokenFailure = $false; AllowValidation = $false; AllowGroupCreate = $false; AllowSetup = $false; GraphGrants = 0; ExoTokenFault = ''; ServicePrincipals = 0
     }
     function global:az {
       $f = $global:targetGuard
@@ -98,7 +99,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
           if ($Method -eq 'POST' -and $Uri -match '/publish\?') { $f.Published = $f.Draft; return }
           if ($Method -eq 'PUT' -and $Uri -match '/jobSchedules/') { return }
         }
-        if ($f.AllowValidation -and $Method -eq 'PUT' -and $Uri -match '/jobs/[^/]+\?') { return @{} }
+        if ($f.AllowValidation -and $Method -eq 'PUT' -and $Uri -match '/jobs/[^/]+\?') { $f.JobBodies.Add([string]$Body); return @{} }
         throw "Offline mutation tripwire: $Method $Uri"
       }
       $f.Reads.Add([string]$Uri)
@@ -119,7 +120,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
         if ($path -eq "https://management.azure.com$($f.Job.id)") { return $f.Job }
       }
       if ($f.AllowValidation -and $Uri -match '/jobs/[^/]+/streams\?') { return [pscustomobject]@{ value = @() } }
-      if ($f.AllowValidation -and $Uri -match '/jobs/[^/]+\?') { return [pscustomobject]@{ properties = @{ status = 'Completed' } } }
+      if ($f.AllowValidation -and $Uri -match '/jobs/[^/]+\?') { return [pscustomobject]@{ properties = @{ status = $f.JobStatus; exception = $f.JobException } } }
       throw "Offline read tripwire: $Method $Uri"
     }
     function global:Start-Sleep { param($Seconds) }
@@ -199,6 +200,41 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
     $tokenCalls[0] | Should -Match "--subscription $script:guardSub"
     ($f.Cli -join '|') | Should -Not -Match 'account set|account list|account show|login'
     $f.CachedDefault.id | Should -BeExactly $script:guardOther
+  }
+
+  It 'serializes the actual job parameter contract for <Mode>' -ForEach @(@{ Mode = 'default' }, @{ Mode = 'enabled' }, @{ Mode = 'explicit false' }) {
+    $f = $global:targetGuard; $f.AllowValidation = $true
+    $arguments = @{ Name = 'Invoke-RunbookValidation.ps1' }
+    if ($Mode -ne 'default') { $arguments.RuntimeValidationOnly = ($Mode -eq 'enabled') }
+    Invoke-GuardEntrypoint @arguments | Out-Null
+    $f.JobBodies.Count | Should -Be 1
+    $job = $f.JobBodies[0] | ConvertFrom-Json -AsHashtable
+    $job.properties.runbook.name | Should -BeExactly 'maester-runbook'
+    if ($Mode -eq 'enabled') {
+      $job.properties.parameters.Count | Should -Be 1
+      $job.properties.parameters.RuntimeValidationOnly | Should -BeOfType ([string])
+      $job.properties.parameters.RuntimeValidationOnly | Should -BeExactly 'true'
+      ($job.properties.parameters.RuntimeValidationOnly | ConvertFrom-Json) | Should -BeOfType ([bool])
+      ($job.properties.parameters.RuntimeValidationOnly | ConvertFrom-Json) | Should -BeTrue
+    } else { $job.properties.parameters.Count | Should -Be 0 }
+    $f.Writes[0] | Should -Match "^PUT https://management.azure.com/subscriptions/$script:guardSub/resourceGroups/rg-guard/providers/Microsoft.Automation/automationAccounts/aa-guard/jobs/"
+    ($f.Cli -join '|') | Should -Match "--subscription $script:guardSub"
+    ($f.Cli -join '|') | Should -Not -Match 'account set|login'
+  }
+
+  It 'preserves service failure reporting in runtime-only mode' {
+    $f = $global:targetGuard; $f.AllowValidation = $true
+    $f.JobStatus = 'Failed'; $f.JobException = 'locked import failed'
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly } |
+      Should -Throw '*Final status: Failed. Exception: locked import failed*'
+    $f.JobBodies.Count | Should -Be 1
+  }
+
+  It 'still blocks the runtime-only job for an invalid target' {
+    $f = $global:targetGuard; $f.AllowValidation = $true; $f.Metadata.state = 'Disabled'
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly } | Should -Throw '*Enabled*'
+    Assert-GuardNoWrites
+    $f.JobBodies.Count | Should -Be 0
   }
 
   It 'fails actual validation before job creation when token provenance is <_>' -ForEach @('wrong tenant', 'wrong subscription', 'missing token', 'CLI failure') {
