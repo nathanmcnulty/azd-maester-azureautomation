@@ -81,6 +81,39 @@ if (-not $PSBoundParameters.ContainsKey('PermissionProfile') -and $env:PERMISSIO
   $PermissionProfile = $env:PERMISSION_PROFILE
 }
 
+# The shared wizard always writes VALIDATE_RUNBOOK_ON_PROVISION=true.
+# This local override allows an intentional single validation, followed by
+# repeat upgrades that do not start another Automation job.
+$controlValues = Get-MaesterDeploymentValues -EnvironmentName $EnvironmentName -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
+if ($null -ne $env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION -and
+    $controlValues.ContainsKey('AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION') -and
+    $env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION -ine [string]$controlValues['AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION']) {
+  throw 'The process AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION differs from the selected azd environment.'
+}
+$validateValue = if ($controlValues.ContainsKey('AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION')) {
+  [string]$controlValues['AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION']
+} elseif ($null -ne $env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION) {
+  $env:AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION
+} else { 'true' }
+if ($validateValue -notin @('true', 'false')) {
+  throw 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION must be true or false.'
+}
+$validateRunbook = $validateValue -eq 'true'
+if ($null -ne $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS -and
+    $controlValues.ContainsKey('AUTOMATION_UPGRADE_PRESERVE_ACCESS') -and
+    $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS -ine [string]$controlValues['AUTOMATION_UPGRADE_PRESERVE_ACCESS']) {
+  throw 'The process AUTOMATION_UPGRADE_PRESERVE_ACCESS differs from the selected azd environment.'
+}
+$preserveAccessValue = if ($controlValues.ContainsKey('AUTOMATION_UPGRADE_PRESERVE_ACCESS')) {
+  [string]$controlValues['AUTOMATION_UPGRADE_PRESERVE_ACCESS']
+} elseif ($null -ne $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS) {
+  $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS
+} else { 'false' }
+if ($preserveAccessValue -notin @('true', 'false')) {
+  throw 'AUTOMATION_UPGRADE_PRESERVE_ACCESS must be true or false.'
+}
+$preserveExistingAccess = $preserveAccessValue -eq 'true'
+
 Write-Host 'Running postprovision setup...'
 
 $setupParams = @{
@@ -157,67 +190,6 @@ if ($envValues.Count -gt 0) {
   if (-not [string]::IsNullOrWhiteSpace($exoSpDisplayNameValue)) { $exoServicePrincipalDisplayNameFromEnv = $exoSpDisplayNameValue }
 }
 
-Write-Host 'Running postprovision runbook validation...'
-
-# When Exchange or Teams permissions were just provisioned, poll Graph API
-# to verify the app role assignments are visible before triggering validation.
-# This uses active polling that proceeds as soon as permissions are verified.
-$needsReplicationWait = $false
-if ($exchangeSetupStatusFromEnv -eq 'configured' -or $teamsSetupStatusFromEnv -eq 'configured') {
-  $needsReplicationWait = $true
-}
-if ($needsReplicationWait) {
-  # Retrieve the managed identity principal ID from azd env
-  $miPrincipalId = Get-EnvValue -Lines $envValues -Name 'AUTOMATION_MI_PRINCIPAL_ID'
-  if ($miPrincipalId) {
-    $pollInterval = 15
-    $maxWaitSeconds = 180
-    $elapsed = 0
-    $confirmed = $false
-    Write-Host "Polling Graph API to verify Exchange/Teams permission assignments (up to ${maxWaitSeconds}s)..."
-    while ($elapsed -lt $maxWaitSeconds) {
-      try {
-        $assignments = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$miPrincipalId/appRoleAssignments" -TenantId $TenantId
-        $assignedRoles = @($assignments.value | ForEach-Object { $_.appRoleId })
-        # Exchange.ManageAsApp role ID: dc50a0fb-09a3-484d-be87-e023b12c6440
-        $exoReady = ($exchangeSetupStatusFromEnv -ne 'configured') -or ($assignedRoles -contains 'dc50a0fb-09a3-484d-be87-e023b12c6440')
-        # Check for any Teams-related app role assignment
-        $teamsReady = ($teamsSetupStatusFromEnv -ne 'configured') -or ($assignedRoles.Count -gt 0)
-        if ($exoReady -and $teamsReady) {
-          Write-Host "  Permission assignments confirmed in Graph after ${elapsed}s."
-          $confirmed = $true
-          break
-        }
-      } catch {
-        Write-Verbose "  Graph poll attempt failed: $($_.Exception.Message)"
-      }
-      Start-Sleep -Seconds $pollInterval
-      $elapsed += $pollInterval
-      Write-Host "  Waiting for permission replication... (${elapsed}s elapsed)"
-    }
-    if (-not $confirmed) {
-      Write-Warning "Permission verification timed out after ${maxWaitSeconds}s. Proceeding to validation (retry logic in runbook will handle any remaining delay)."
-    }
-  } else {
-    Write-Warning 'Managed identity principal ID not found in environment. Skipping permission verification polling.'
-  }
-}
-
-$automationAccountName = "aa-$($EnvironmentName.ToLower())"
-$testParams = @{
-  SubscriptionId       = $SubscriptionId
-  ResourceGroupName    = $ResourceGroupName
-  AutomationAccountName = $automationAccountName
-  RunbookName          = 'maester-runbook'
-}
-if ($TenantId) {
-  $testParams['TenantId'] = $TenantId
-}
-
-$testParams['PassThru'] = $true
-
-$validationResult = & "$PSScriptRoot\Invoke-RunbookValidation.ps1" @testParams
-
 $armToken = az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ --query accessToken -o tsv
 $armHeaders = @{ Authorization = "Bearer $armToken" }
 $resourcesPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/resources?api-version=2021-04-01"
@@ -237,6 +209,78 @@ $automationResource = Resolve-MaesterMainDeploymentTarget -EnvironmentValues $en
   -ProviderType 'Microsoft.Automation/automationAccounts' -ApiVersion '2023-11-01' `
   -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName -EnvironmentName $EnvironmentName `
   -SolutionName 'automation-account' -GetResource $getExactResource
+$validationResult = [pscustomobject]@{
+  ValidationPassed = $false
+  JobId = 'n/a'
+  FinalStatus = 'Skipped'
+  CompletedAt = 'n/a'
+}
+if ($validateRunbook) {
+  Write-Host 'Running postprovision runbook validation...'
+
+  # When Exchange or Teams permissions were just provisioned, poll Graph API
+  # to verify the app role assignments are visible before triggering validation.
+  # This uses active polling that proceeds as soon as permissions are verified.
+  $needsReplicationWait = $false
+  if (-not $preserveExistingAccess -and ($exchangeSetupStatusFromEnv -eq 'configured' -or $teamsSetupStatusFromEnv -eq 'configured')) {
+    $needsReplicationWait = $true
+  }
+  if ($needsReplicationWait) {
+    # Retrieve the managed identity principal ID from azd env
+    $miPrincipalId = Get-EnvValue -Lines $envValues -Name 'AUTOMATION_MI_PRINCIPAL_ID'
+    if ($miPrincipalId) {
+      $pollInterval = 15
+      $maxWaitSeconds = 180
+      $elapsed = 0
+      $confirmed = $false
+      Write-Host "Polling Graph API to verify Exchange/Teams permission assignments (up to ${maxWaitSeconds}s)..."
+      while ($elapsed -lt $maxWaitSeconds) {
+        try {
+          $assignments = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$miPrincipalId/appRoleAssignments" -TenantId $TenantId
+          $assignedRoles = @($assignments.value | ForEach-Object { $_.appRoleId })
+          # Exchange.ManageAsApp role ID: dc50a0fb-09a3-484d-be87-e023b12c6440
+          $exoReady = ($exchangeSetupStatusFromEnv -ne 'configured') -or ($assignedRoles -contains 'dc50a0fb-09a3-484d-be87-e023b12c6440')
+          # Check for any Teams-related app role assignment
+          $teamsReady = ($teamsSetupStatusFromEnv -ne 'configured') -or ($assignedRoles.Count -gt 0)
+          if ($exoReady -and $teamsReady) {
+            Write-Host "  Permission assignments confirmed in Graph after ${elapsed}s."
+            $confirmed = $true
+            break
+          }
+        } catch {
+          Write-Verbose "  Graph poll attempt failed: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds $pollInterval
+        $elapsed += $pollInterval
+        Write-Host "  Waiting for permission replication... (${elapsed}s elapsed)"
+      }
+      if (-not $confirmed) {
+        Write-Warning "Permission verification timed out after ${maxWaitSeconds}s. Proceeding to validation (retry logic in runbook will handle any remaining delay)."
+      }
+    } else {
+      Write-Warning 'Managed identity principal ID not found in environment. Skipping permission verification polling.'
+    }
+  }
+
+  $automationAccountName = [string]$automationResource.name
+  $testParams = @{
+    SubscriptionId       = $SubscriptionId
+    ResourceGroupName    = $ResourceGroupName
+    AutomationAccountName = $automationAccountName
+    RunbookName          = 'maester-runbook'
+  }
+  if ($TenantId) {
+    $testParams['TenantId'] = $TenantId
+  }
+
+  $testParams['PassThru'] = $true
+
+  $validationResult = & "$PSScriptRoot\Invoke-RunbookValidation.ps1" @testParams
+}
+else {
+  Write-Host 'Runbook validation skipped by AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION=false; no validation job was started.'
+}
+
 $storageResource = $summaryTargets.StorageAccount
 $webAppResource = $summaryTargets.WebApp
 $planResource = if ($webAppResource -and $webAppResource.properties.serverFarmId) {
@@ -265,6 +309,7 @@ $summaryLines += "Include Exchange: $includeExchangeFromEnv"
 $summaryLines += "Include Teams: $includeTeamsFromEnv"
 $summaryLines += "Include Azure: $includeAzureFromEnv"
 $summaryLines += "Permission profile: $PermissionProfile"
+$summaryLines += "Preserve existing access: $($preserveExistingAccess.ToString().ToLower())"
 $summaryLines += "Azure RBAC scopes: $azureScopesFromEnv"
 $summaryLines += "Exchange setup status: $exchangeSetupStatusFromEnv"
 $summaryLines += "Teams setup status: $teamsSetupStatusFromEnv"
@@ -314,7 +359,7 @@ else {
 }
 $summaryLines += ""
 $summaryLines += '## Validation Results'
-$summaryLines += "- Runbook validation status: $(if ($validationResult.ValidationPassed) { 'Passed' } else { 'Failed' })"
+$summaryLines += "- Runbook validation status: $(if (-not $validateRunbook) { 'Skipped' } elseif ($validationResult.ValidationPassed) { 'Passed' } else { 'Failed' })"
 $summaryLines += "- Runbook job id: $($validationResult.JobId)"
 $summaryLines += "- Runbook final status: $($validationResult.FinalStatus)"
 $summaryLines += "- Validation completed at: $($validationResult.CompletedAt)"

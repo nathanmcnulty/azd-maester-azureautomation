@@ -7,6 +7,15 @@ BeforeAll {
     $script:invokeBlock = [scriptblock]::Create($script:runner.Substring($start, $end - $start))
     $script:originalDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
     $script:originalMarker = [Environment]::GetEnvironmentVariable('DRIFT_TEST_MARKER', 'Process')
+    function Restore-ProcessEnvironmentVariable {
+        param([Parameter(Mandatory)][string]$Name, [AllowNull()][string]$Value)
+        $valueToRestore = if ($null -eq $Value) {
+            [System.Management.Automation.Language.NullString]::Value
+        } else {
+            $Value
+        }
+        [Environment]::SetEnvironmentVariable($Name, $valueToRestore, 'Process')
+    }
     function Invoke-Maester {
         $script:observedDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
         if ($script:throwDuringRun) { throw 'controlled Maester failure' }
@@ -14,8 +23,8 @@ BeforeAll {
 }
 Describe 'Default-disabled drift isolation' {
     AfterEach {
-        [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', $script:originalDriftRoot, 'Process')
-        [Environment]::SetEnvironmentVariable('DRIFT_TEST_MARKER', $script:originalMarker, 'Process')
+        Restore-ProcessEnvironmentVariable -Name 'MAESTER_FOLDER_DRIFT' -Value $script:originalDriftRoot
+        Restore-ProcessEnvironmentVariable -Name 'DRIFT_TEST_MARKER' -Value $script:originalMarker
     }
     It 'isolates and restores an inherited root when failure is <fails>' -ForEach @(@{fails=$false}, @{fails=$true}) {
         $maesterInvokeParameters = @{}; $testsPath = 'fixture-tests'
@@ -26,12 +35,14 @@ Describe 'Default-disabled drift isolation' {
         $script:observedDriftRoot | Should -BeNullOrEmpty
         [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process') | Should -BeExactly 'unapproved-inherited-folder'
     }
-    It 'preserves an unset root after the run' {
+    It 'preserves an unset root after the run when failure is <fails>' -ForEach @(@{fails=$false}, @{fails=$true}) {
         $maesterInvokeParameters = @{}; $testsPath = 'fixture-tests'; $script:throwDuringRun = $false
-        [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', $null, 'Process')
-        & $script:invokeBlock | Out-Null
+        [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', [System.Management.Automation.Language.NullString]::Value, 'Process')
+        $script:throwDuringRun = $fails
+        if ($fails) { { & $script:invokeBlock } | Should -Throw '*controlled Maester failure*' }
+        else { & $script:invokeBlock | Out-Null }
         $script:observedDriftRoot | Should -BeNullOrEmpty
-        [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process') | Should -BeNullOrEmpty
+        [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process') | Should -Be $null
     }
     It 'excludes the upstream drift file before Pester discovery while ordinary tests run' {
         $testsPath = Join-Path $TestDrive 'suite'

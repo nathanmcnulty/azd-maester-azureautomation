@@ -5,8 +5,8 @@
 
 - **Schema version:** 1.0.0
 - **Repository:** nathanmcnulty/azd-maester-azureautomation
-- **Source revision:** `458a1e9a1d09e4baca5cbd917d0b2a0dce055444`
-- **Captured:** 2026-10-16
+- **Source revision:** `5b0a8ad9c5a6ac2153b95ee1e596de5daa17ab71`
+- **Captured:** 2026-10-17
 - **Items:** 10
 
 ## MAUTO-001: Reconcile this backlog with current source and active work
@@ -224,6 +224,7 @@ The runtime upgrade selects PowerShell 7.6, but maintained scripts lacked a mini
 - 2026-10-16&colon; Source follow-up based on runtime PR26 head 36804911c0ea8de8f301a6f4ec6ba995c8c55124. All nine owned scripts enforce PowerShell 7.6 before execution. Vendored scripts, runtime package locks and historical evidence are unchanged.
 - PowerShell 7.6.6 with actual Pester 6.2.0&colon; all 75 repository tests passed, zero failed or skipped. This is offline source evidence; it does not establish native runtime startup, runbook preservation or workload execution. Existing runtime/preservation PRs and live gates remain open.
 - Renumbered the authoring-baseline task to MAUTO-008 to preserve viewer tasks MAUTO-006/007 already allocated in reviewed pending preservation branch c53cbe1e484fbf26e9834fe202783a934f849523. Both original viewer records remain proposed and unchanged; this is metadata reconciliation, not viewer implementation or authorization.
+- 2026-10-17 reconciliation&colon; merged Automation origin/main 5b0a8ad9c5a6ac2153b95ee1e596de5daa17ab71 into the PS7.6 branch without adopting the separate azd-reference main candidate 3f88050. The current merged source has eleven maintained PowerShell entry/helper scripts, exact Pester 6.2 CI and the pinned Bicep preservation check; the full offline suite passed 582/582 on PowerShell 7.6.6 with BICEP&lowbar;EXE bound to the local v0.42.1 executable. Permission evidence was checked against current bytes and only the Setup-PostDeploy.ps1 hash required refresh; requirements and grants were unchanged.
 
 **Review and authorization note:**
 
@@ -395,6 +396,7 @@ Omitting DriftRoot leaves upstream Maester able to discover unapproved input fro
 - PowerShell 7.6.6/Pester 6.2.0 full repository validation passed 79/79 with zero nonpasses; parser and differential analyzer checks found no new supported-runtime issue. Three isolation regression cases fail against the original runner, and all four pass with the fix.
 - Actual offline locked Maester 2.2.0 Invoke-Maester qualification used this host production configuration/invocation blocks, an unchanged hash-verified upstream suite, one ordinary synthetic test and an inherited unapproved input folder. Exactly one ordinary test passed, drift stayed excluded, the inherited environment was restored, and no HTTP/authentication tripwire fired. Qualification supplies offline connection flags and invokes only assessment blocks; publisher paths are outside this check, and no native job, workload identity, Blob publication/access or cleanup outcome is claimed.
 - Default-disabled isolation only; MAUTO-010 retains the approved-input adapter, normalization/privacy and native qualification gates. Existing runtime/deployment validation evidence is preserved.
+- 2026-10-17 reconciliation&colon; default-disabled drift isolation now clears and restores MAESTER&lowbar;FOLDER&lowbar;DRIFT with PowerShell NullString semantics, preserving absent, empty and nonempty process states across success and throw. Drift regression coverage passed 5/5 and the full Pester 6.2 suite passed 582/582; locked Maester absent, empty and inherited qualifications each retained one ordinary assessment result with no HTTP/authentication activity. No collector, permission or live publication authority was added.
 
 **Review and authorization note:**
 

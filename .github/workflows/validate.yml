@@ -27,6 +27,14 @@ jobs:
           if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or newer is required.' }
           Write-Host "Validation PowerShell: $($PSVersionTable.PSVersion)"
           Install-Module Pester -RequiredVersion 6.2.0 -Scope CurrentUser -Force
+      - name: Require compiled ARM preservation contracts
+        run: |
+          az bicep install --version v0.42.1
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Bicep installation failed.' }
+          $azureConfigDir = if ($env:AZURE_CONFIG_DIR) { $env:AZURE_CONFIG_DIR } else { Join-Path $HOME '.azure' }
+          $bicepPath = Join-Path $azureConfigDir 'bin/bicep'
+          if (-not (Test-Path -LiteralPath $bicepPath)) { throw 'Bicep CLI was not found after installation.' }
+          "BICEP_EXE=$bicepPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Run repository tests
         run: |
           Import-Module Pester -RequiredVersion 6.2.0 -Force
