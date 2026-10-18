@@ -29,7 +29,7 @@ $ConfirmPreference = 'None'
 # Also enforce at runtime: Automation hosts may not honor #Requires.
 if ($PSVersionTable.PSVersion -lt [version]'7.6' -or $PSVersionTable.PSEdition -ne 'Core' -or
     [Environment]::Version.Major -lt 10) {
-  throw 'The maintained runbook requires PowerShell 7.6+ Core on .NET 10+.'
+  throw ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+. Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, [Environment]::Version, [Environment]::Version.Major)
 }
 
 # Azure Automation currently accepts a package contentLink with an incorrect
