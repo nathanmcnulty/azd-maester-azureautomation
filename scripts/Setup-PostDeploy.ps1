@@ -61,9 +61,14 @@ if (-not $TenantId -and $env:AZURE_TENANT_ID) {
   $TenantId = $env:AZURE_TENANT_ID
 }
 
+if ([string]::IsNullOrWhiteSpace($TenantId)) {
+  throw 'TenantId is required. Pass -TenantId or set AZURE_TENANT_ID to the expected tenant.'
+}
+
 $azAccount = Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId
-if (-not $TenantId) { $TenantId = $azAccount.tenantId }
-$armToken = az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ --query accessToken -o tsv
+$TenantId = $azAccount.tenantId
+$armToken = Get-AzCliAccessToken -SubscriptionId $SubscriptionId -TenantId $TenantId -Resource 'https://management.azure.com/'
+if ([string]::IsNullOrWhiteSpace($armToken)) { throw 'ARM token acquisition failed for the validated target.' }
 $armHeaders = @{ Authorization = "Bearer $armToken" }
 if (-not $EnvironmentName) {
   $EnvironmentName = if ($env:AZURE_ENV_NAME) { $env:AZURE_ENV_NAME } else { 'dev' }
@@ -379,7 +384,7 @@ else {
       $exoServicePrincipalDisplayName = $miSp.displayName
 
       $installMsg = "Exchange Online PowerShell is required to grant the managed identity the Exchange RBAC role 'View-Only Configuration'."
-      if (-not (Test-ModuleAvailable -ModuleName 'ExchangeOnlineManagement' -InstallMessage $installMsg)) {
+      if (-not (Maester-SetupHelpers\Test-ModuleAvailable -ModuleName 'ExchangeOnlineManagement' -InstallMessage $installMsg)) {
         throw 'ExchangeOnlineManagement module is not available. Install it and rerun setup with -IncludeExchange.'
       }
 
@@ -398,7 +403,7 @@ else {
         Write-Verbose "Could not resolve tenant initial domain: $($_.Exception.Message)"
       }
 
-      Connect-ExchangeOnlineSilent -Organization $exoOrganization
+      Connect-ExchangeOnlineSilent -Organization $exoOrganization -TenantId $TenantId
 
       try {
         New-ServicePrincipal -AppId $miSp.appId -ObjectId $principalId -DisplayName $miSp.displayName | Out-Null

@@ -2,6 +2,9 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptFiles = Get-ChildItem -LiteralPath $repoRoot -Recurse -File -Include *.ps1, *.psm1 |
   Where-Object { $_.FullName -notmatch '[\\/](?:\.git|tests)[\\/]' }
 
+# Offline command seam: every execution below must be mocked.
+function global:az { throw 'Unexpected Azure CLI call in offline test.' }
+
 Import-Module (Join-Path $repoRoot 'scripts\vendor\Azd.MaesterHooks\Maester-SetupHelpers.psm1') -Force
 
 Describe 'Azure CLI target context' {
@@ -30,7 +33,7 @@ Describe 'Selected subscription validation' {
     BeforeEach {
       Mock az {
         $global:LASTEXITCODE = 0
-        '[{"id":"11111111-1111-1111-1111-111111111111","tenantId":"22222222-2222-2222-2222-222222222222"}]'
+        '{"id":"/subscriptions/11111111-1111-1111-1111-111111111111","subscriptionId":"11111111-1111-1111-1111-111111111111","tenantId":"22222222-2222-2222-2222-222222222222","state":"Enabled","displayName":"Intended"}'
       }
     }
 

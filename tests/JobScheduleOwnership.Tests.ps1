@@ -28,6 +28,8 @@ BeforeAll {
       $global:maesterOfflineCalls = [Collections.Generic.List[string]]::new()
       $global:maesterOfflineWrites = @{}
       function Import-Module { param([string]$Name, [switch]$Force) }
+      # Target guard behavior is exercised with real helpers in TargetGuardEntrypoints.Tests.ps1.
+      function Get-AzCliSubscriptionContext { param($SubscriptionId, $TenantId) [pscustomobject]@{ id = $SubscriptionId; tenantId = $TenantId; state = 'Enabled' } }
       function Invoke-MaesterPreProvision { param($SolutionName, $SubscriptionId, $TenantId, $Location) }
       function azd {
         $global:maesterOfflineCalls.Add("azd $($args -join ' ')")

@@ -25,9 +25,15 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-SetupHelpers.psm1') -Force
 
+if (-not $TenantId -and $env:AZURE_TENANT_ID) { $TenantId = $env:AZURE_TENANT_ID }
+if ([string]::IsNullOrWhiteSpace($TenantId)) {
+  throw 'TenantId is required. Pass -TenantId or set AZURE_TENANT_ID to the expected tenant.'
+}
+
 $azAccount = Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId
-if (-not $TenantId) { $TenantId = $azAccount.tenantId }
-$armToken = az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ --query accessToken -o tsv
+$TenantId = $azAccount.tenantId
+$armToken = Get-AzCliAccessToken -SubscriptionId $SubscriptionId -TenantId $TenantId -Resource 'https://management.azure.com/'
+if ([string]::IsNullOrWhiteSpace($armToken)) { throw 'ARM token acquisition failed for the validated target.' }
 $armHeaders = @{ Authorization = "Bearer $armToken" }
 
 $apiVersion = '2023-11-01'

@@ -27,6 +27,12 @@ if (($SubscriptionId -and $ambientValues['AZURE_SUBSCRIPTION_ID'] -ine $Subscrip
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-PreProvision.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-Helpers.psm1') -Force
 
+if (-not $SubscriptionId) { $SubscriptionId = [string]$ambientValues['AZURE_SUBSCRIPTION_ID'] }
+if (-not $TenantId) { $TenantId = [string]$ambientValues['AZURE_TENANT_ID'] }
+if ([string]::IsNullOrWhiteSpace($TenantId)) { throw 'The selected azd environment must specify AZURE_TENANT_ID.' }
+Import-Module (Join-Path $PSScriptRoot 'vendor/Azd.MaesterHooks/Maester-SetupHelpers.psm1') -Force
+Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId | Out-Null
+
 $location = $env:AZURE_LOCATION
 Invoke-MaesterPreProvision `
   -SolutionName 'automation-account' `
