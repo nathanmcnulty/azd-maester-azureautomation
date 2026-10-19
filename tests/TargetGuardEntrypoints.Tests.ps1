@@ -7,13 +7,14 @@ BeforeAll {
   $script:guardTenant = '22222222-2222-4222-8222-222222222222'
   $script:guardOther = '99999999-9999-4999-8999-999999999999'
   function Invoke-GuardEntrypoint {
-    param([string]$Name, [switch]$WithoutTenant, [switch]$RuntimeValidationOnly)
+    param([string]$Name, [switch]$WithoutTenant, [switch]$RuntimeValidationOnly, [switch]$AllowRuntimeValidationPreview)
     if ($Name -eq 'Run-AzdPreUp.ps1') { & (Join-Path $script:guardRepo "scripts/$Name"); return }
     $parameters = @{ SubscriptionId = $script:guardSub }
     if (-not $WithoutTenant) { $parameters.TenantId = $script:guardTenant }
     if ($Name -ne 'Run-AzdPreProvision.ps1') { $parameters.ResourceGroupName = 'rg-guard' }
     if ($Name -eq 'Invoke-RunbookValidation.ps1') {
       $parameters.AutomationAccountName = 'aa-guard'; $parameters.PassThru = $true
+      if ($PSBoundParameters.ContainsKey('AllowRuntimeValidationPreview')) { $parameters.AllowRuntimeValidationPreview = $AllowRuntimeValidationPreview }
       if ($PSBoundParameters.ContainsKey('RuntimeValidationOnly')) { $parameters.RuntimeValidationOnly = $RuntimeValidationOnly }
     } elseif ($Name -ne 'Run-AzdPreProvision.ps1') { $parameters.EnvironmentName = 'guard' }
     & (Join-Path $script:guardRepo "scripts/$Name") @parameters
@@ -220,6 +221,32 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
     $f.Writes[0] | Should -Match "^PUT https://management.azure.com/subscriptions/$script:guardSub/resourceGroups/rg-guard/providers/Microsoft.Automation/automationAccounts/aa-guard/jobs/"
     ($f.Cli -join '|') | Should -Match "--subscription $script:guardSub"
     ($f.Cli -join '|') | Should -Not -Match 'account set|login'
+  }
+
+  It 'serializes the exact preview opt-in Boolean strings' {
+    $f = $global:targetGuard; $f.AllowValidation = $true
+    Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly -AllowRuntimeValidationPreview | Out-Null
+    $job = $f.JobBodies[0] | ConvertFrom-Json -AsHashtable
+    $job.properties.parameters.Count | Should -Be 2
+    foreach ($name in 'RuntimeValidationOnly', 'AllowRuntimeValidationPreview') {
+      $job.properties.parameters[$name] | Should -BeOfType ([string])
+      $job.properties.parameters[$name] | Should -BeExactly 'true'
+      ($job.properties.parameters[$name] | ConvertFrom-Json) | Should -BeTrue
+    }
+  }
+
+  It 'rejects preview opt-in without runtime-only mode before CLI or writes' {
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -AllowRuntimeValidationPreview } | Should -Throw '*requires RuntimeValidationOnly*'
+    Assert-GuardNoWrites
+    $global:targetGuard.Cli.Count | Should -Be 0
+  }
+
+  It 'omits an explicitly false preview parameter' {
+    $f = $global:targetGuard; $f.AllowValidation = $true
+    Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly -AllowRuntimeValidationPreview:$false | Out-Null
+    $job = $f.JobBodies[0] | ConvertFrom-Json -AsHashtable
+    $job.properties.parameters.Count | Should -Be 1
+    $job.properties.parameters.ContainsKey('AllowRuntimeValidationPreview') | Should -BeFalse
   }
 
   It 'preserves service failure reporting in runtime-only mode' {
