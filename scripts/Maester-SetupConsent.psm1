@@ -34,7 +34,16 @@ function Test-MaesterSetupDesiredState {
   if ($Desired -is [Collections.IDictionary]) {
     if ($null -eq $Actual) { return $false }
     foreach ($key in $Desired.Keys) {
-      if (-not (Test-MaesterSetupDesiredState -Actual (Get-MaesterSetupProperty $Actual $key) -Desired $Desired[$key])) { return $false }
+      # Read directly so an explicitly empty array remains distinguishable from
+      # a missing/null property; pipeline output would enumerate it away.
+      if ($Actual -is [Collections.IDictionary]) {
+        if (-not $Actual.Contains($key)) { return $false }
+        $actualValue = $Actual[$key]
+      } else {
+        if (-not $Actual.PSObject.Properties[$key]) { return $false }
+        $actualValue = $Actual.$key
+      }
+      if (-not (Test-MaesterSetupDesiredState -Actual $actualValue -Desired $Desired[$key])) { return $false }
     }
     return $true
   }
@@ -195,7 +204,7 @@ function Get-MaesterSetupAccessPlan {
     $appBody = [ordered]@{ groupMembershipClaims = 'SecurityGroup'; web = [ordered]@{ redirectUris = $redirects; implicitGrantSettings = [ordered]@{ enableIdTokenIssuance = $true; enableAccessTokenIssuance = $false } } }
     $inventory['easyAuthApplication'] = if ($app) { [ordered]@{ id = $app.id; appId = $app.appId; groupMembershipClaims = (Get-MaesterSetupProperty $app 'groupMembershipClaims'); web = (Get-MaesterSetupProperty $app 'web') } } else { $null }
     if (-not $app) {
-      $appBody['displayName'] = $displayName; $appBody['signInAudience'] = 'AzureADMyOrg'
+      $appBody['displayName'] = $displayName; $appBody['signInAudience'] = 'AzureADMyOrg'; $appBody['identifierUris'] = @()
       $operations.Add((New-MaesterSetupOperation 'EasyAuth' 'POST' 'https://graph.microsoft.com/v1.0/applications' $appBody 'EasyAuthApplication'))
     } else {
       $web = Get-MaesterSetupProperty $app 'web'
@@ -237,6 +246,8 @@ function Get-MaesterSetupAccessPlan {
     $currentAuth = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$authUri" -Headers $ArmHeaders
     if ($null -eq $currentAuth -or -not $currentAuth.PSObject.Properties['properties']) { throw 'Easy Auth current settings could not be read.' }
     $inventory['easyAuthSettings'] = $currentAuth.properties
+    $inventory['easyAuthWebAppId'] = [string]$WebApp.id
+    $inventory['easyAuthGraphResourceId'] = [string]$graph[0].id
     $authBody = [ordered]@{ properties = [ordered]@{
       platform = [ordered]@{ enabled = $true }
       globalValidation = [ordered]@{ requireAuthentication = $true; unauthenticatedClientAction = 'RedirectToLoginPage' }
@@ -270,57 +281,266 @@ function Get-MaesterSetupAccessPlan {
     -Desired $desired -Missing $missing -Details $details
 }
 
+function Get-MaesterSetupOwnedParent {
+  param($Session, [string]$Kind, [string]$IdName, [string]$Id)
+  if (-not $Id -or $Id.StartsWith('{')) { return $null }
+  $matches = @((Get-MaesterOwnershipJournal -Session $Session).records | Where-Object {
+    $_.kind -ceq $Kind -and $_.ownership -ceq 'Created' -and $_.state -ceq 'applied' -and
+    (Get-MaesterSetupProperty $_.exactIds $IdName) -ceq $Id
+  })
+  if ($matches.Count -gt 1) { throw 'Multiple ownership receipts describe the same setup parent.' }
+  if ($matches.Count -eq 1) { return [string]$matches[0].operationId }
+  return $null
+}
+
+function Get-MaesterEasyAuthApplicationValues {
+  param($Application)
+  $web = Get-MaesterSetupProperty $Application 'web'
+  $implicit = Get-MaesterSetupProperty $web 'implicitGrantSettings'
+  [ordered]@{
+    groupMembershipClaims = Get-MaesterSetupProperty $Application 'groupMembershipClaims'
+    redirectUris = @(Get-MaesterSetupProperty $web 'redirectUris' @())
+    enableIdTokenIssuance = Get-MaesterSetupProperty $implicit 'enableIdTokenIssuance' $false
+    enableAccessTokenIssuance = Get-MaesterSetupProperty $implicit 'enableAccessTokenIssuance' $false
+  }
+}
+
+function Get-MaesterWebAuthValues {
+  param($Properties)
+  $platform = Get-MaesterSetupProperty $Properties 'platform'
+  $validation = Get-MaesterSetupProperty $Properties 'globalValidation'
+  $http = Get-MaesterSetupProperty $Properties 'httpSettings'
+  $aad = Get-MaesterSetupProperty (Get-MaesterSetupProperty $Properties 'identityProviders') 'azureActiveDirectory'
+  $registration = Get-MaesterSetupProperty $aad 'registration'
+  $aadValidation = Get-MaesterSetupProperty $aad 'validation'
+  $groups = Get-MaesterSetupProperty (Get-MaesterSetupProperty (Get-MaesterSetupProperty $aadValidation 'defaultAuthorizationPolicy') 'allowedPrincipals') 'groups' @()
+  # Only explicitly supported non-secret fields enter the ownership journal.
+  [ordered]@{
+    enabled = Get-MaesterSetupProperty $platform 'enabled' $false
+    requireAuthentication = Get-MaesterSetupProperty $validation 'requireAuthentication' $false
+    unauthenticatedClientAction = Get-MaesterSetupProperty $validation 'unauthenticatedClientAction' ''
+    requireHttps = Get-MaesterSetupProperty $http 'requireHttps' $false
+    issuer = Get-MaesterSetupProperty $registration 'openIdIssuer' ''
+    allowedAudiences = @(Get-MaesterSetupProperty $aadValidation 'allowedAudiences' @())
+    allowedGroups = @($groups)
+  }
+}
+
+function Get-MaesterSetupOperationOwnership {
+  param($Session, $Operation, $Body, $Plan, $EasyAuth)
+  $result = @{ Ownership = 'Created'; Expected = @{} }
+  switch ($Operation.category) {
+    { $_ -in @('StorageReader', 'AzureReader') } {
+      $result.Kind = 'AzureRoleAssignment'
+      $scope = $Operation.uri.Split('/providers/Microsoft.Authorization/roleAssignments/')[0]
+      $result.Expected = @{ principalId = $Body.properties.principalId; roleDefinitionId = $Body.properties.roleDefinitionId; scope = $scope; principalType = $Body.properties.principalType }
+    }
+    'Teams' {
+      $result.Kind = 'DirectoryRoleAssignment'; $result.Expected = @{ principalId = $Body.principalId; roleDefinitionId = $Body.roleDefinitionId; directoryScopeId = $Body.directoryScopeId }
+    }
+    'Exchange' {
+      switch ($Operation.method) {
+        'POST' { $result.Kind = 'GraphAppRoleAssignment'; $result.Expected = @{ principalId = $Body.principalId; resourceId = $Body.resourceId; appRoleId = $Body.appRoleId } }
+        'New-ServicePrincipal' { $result.Kind = 'ExchangeServicePrincipal'; $result.Expected = @{ appId = $Body.AppId; servicePrincipalId = $Body.ObjectId } }
+        'New-ManagementRoleAssignment' {
+          $result.Kind = 'ExchangeRoleAssignment'; $result.Expected = @{ servicePrincipalId = $Body.App; roleName = $Body.Role }
+          $result.CoveredByOperationId = Get-MaesterSetupOwnedParent $Session 'ExchangeServicePrincipal' 'exchangeServicePrincipalId' $Body.App
+        }
+        default { throw 'Unrecognized reviewed Exchange setup operation.' }
+      }
+    }
+    'EasyAuth' {
+      if ($Operation.receipt -ceq 'EasyAuthApplication') {
+        $result.Kind = 'EntraApplication'; $result.Expected = @{ purpose = 'EasyAuth'; displayName = $Body.displayName; creatorPrincipalId = $Plan.details.inventory.operator.id; tenantId = $Plan.tenantId; webAppResourceId = $Plan.details.inventory.easyAuthWebAppId }
+        $result.After = Get-MaesterEasyAuthApplicationValues $Body
+        $result.After['identifierUris'] = @($Body.identifierUris)
+        $result.After['signInAudience'] = $Body.signInAudience
+      } elseif ($Operation.receipt -ceq 'EasyAuthPrincipal') {
+        $result.Kind = 'EntraServicePrincipal'; $result.Expected = @{ appId = $Body.appId; appOwnerOrganizationId = $Plan.tenantId; creatorPrincipalId = $Plan.details.inventory.operator.id }
+        $result.CoveredByOperationId = Get-MaesterSetupOwnedParent $Session 'EntraApplication' 'appId' $Body.appId
+      } elseif ($Operation.method -ceq 'PATCH') {
+        $result.Kind = 'ApplicationConfiguration'; $result.Ownership = 'Mutation'
+        $result.Expected = @{ applicationObjectId = $EasyAuth.objectId; appId = $EasyAuth.clientId }
+        $result.Before = Get-MaesterEasyAuthApplicationValues $Plan.details.inventory.easyAuthApplication
+        $result.After = Get-MaesterEasyAuthApplicationValues $Body
+        $result.CoveredByOperationId = Get-MaesterSetupOwnedParent $Session 'EntraApplication' 'applicationObjectId' $EasyAuth.objectId
+      } else { throw 'Unrecognized reviewed Easy Auth setup operation.' }
+    }
+    'EasyAuthConsent' {
+      $result.Kind = 'OAuth2PermissionGrant'
+      $result.Expected = @{ clientId = $EasyAuth.principalId; resourceId = $Plan.details.inventory.easyAuthGraphResourceId; consentType = 'AllPrincipals' }
+      $result.After = @{ scopes = @($Body.scope -split '\s+' | Where-Object { $_ } | Sort-Object -Unique) }
+      $result.CoveredByOperationId = Get-MaesterSetupOwnedParent $Session 'EntraServicePrincipal' 'servicePrincipalId' $EasyAuth.principalId
+      if ($Operation.method -ceq 'PATCH') {
+        $result.Ownership = 'Mutation'; $result.Before = @{ scopes = @($Plan.details.inventory.easyAuthGrant.scope -split '\s+' | Where-Object { $_ } | Sort-Object -Unique) }
+        $result.Expected['servicePrincipalId'] = $EasyAuth.principalId
+        $result.Expected['applicationObjectId'] = $EasyAuth.objectId
+        $result.Expected['appId'] = $EasyAuth.clientId
+      }
+    }
+    'EasyAuthConfiguration' {
+      $result.Kind = 'WebAppAuthConfiguration'; $result.Ownership = 'Mutation'
+      $result.Expected = @{ webAppResourceId = $Plan.details.inventory.easyAuthWebAppId; appId = $EasyAuth.clientId }
+      $result.Before = Get-MaesterWebAuthValues $Plan.details.inventory.easyAuthSettings
+      $result.After = Get-MaesterWebAuthValues $Body.properties
+    }
+    default { throw 'The reviewed setup operation has no ownership journal contract.' }
+  }
+  if ($result.ContainsKey('CoveredByOperationId') -and ($result.Ownership -cne 'Mutation' -or -not $result.CoveredByOperationId)) { $result.Remove('CoveredByOperationId') }
+  return $result
+}
+
+function Get-MaesterSetupOperationExactIds {
+  param($Ownership, $Operation, $Response, [string]$RequestUri, $EasyAuth)
+  switch ($Ownership.Kind) {
+    'AzureRoleAssignment' {
+      $expectedId = $RequestUri.Split('?')[0]
+      if ((Get-MaesterSetupProperty $Response 'id') -ine $expectedId) { throw 'Azure role creation returned no matching exact assignment ID; the ownership operation remains pending.' }
+      return @{ roleAssignmentId = [string]$Response.id }
+    }
+    { $_ -in @('GraphAppRoleAssignment', 'DirectoryRoleAssignment') } {
+      return @{ assignmentId = [string](Get-MaesterSetupProperty $Response 'id' '') }
+    }
+    'ExchangeServicePrincipal' { return @{ exchangeServicePrincipalId = [string](Get-MaesterSetupProperty $Response 'ObjectId' '') } }
+    'ExchangeRoleAssignment' { return @{ exchangeRoleAssignmentId = [string](Get-MaesterSetupProperty $Response 'Identity' '') } }
+    'EntraApplication' { return @{ applicationObjectId = [string](Get-MaesterSetupProperty $Response 'id' ''); appId = [string](Get-MaesterSetupProperty $Response 'appId' '') } }
+    'EntraServicePrincipal' {
+      return @{ servicePrincipalId = [string](Get-MaesterSetupProperty $Response 'id' '') }
+    }
+    'OAuth2PermissionGrant' {
+      $id = if ($Operation.method -ceq 'PATCH') { $Operation.uri.Split('/')[-1] } else { Get-MaesterSetupProperty $Response 'id' '' }
+      return @{ grantId = [string]$id }
+    }
+    'ApplicationConfiguration' { return @{ applicationObjectId = [string]$EasyAuth.objectId } }
+    'WebAppAuthConfiguration' { return @{ webAppResourceId = [string]$Ownership.Expected.webAppResourceId } }
+    default { throw 'The reviewed setup operation has no exact response contract.' }
+  }
+}
+
+function Assert-MaesterSetupOperationResult {
+  param($Ownership, $Operation, $Response, $ExactIds, $ResolvedBody, $PlanParameters)
+  # The response IDs have already been durably checkpointed. A contradiction or
+  # failed verification must retain those IDs as conflict, never roll them back.
+  $observed = $Response
+  $fields = @()
+  switch ($Ownership.Kind) {
+    'GraphAppRoleAssignment' { $fields = @('principalId','resourceId','appRoleId') }
+    'DirectoryRoleAssignment' { $fields = @('principalId','roleDefinitionId','directoryScopeId') }
+    'AzureRoleAssignment' {
+      $observed = Get-MaesterSetupProperty $Response 'properties'
+      $fields = @('principalId','roleDefinitionId','principalType')
+      $hasScope = if ($observed -is [Collections.IDictionary]) { $observed.Contains('scope') } else { $null -ne $observed -and $null -ne $observed.PSObject.Properties['scope'] }
+      if ($hasScope -and (Get-MaesterSetupProperty $observed 'scope') -ine $Ownership.Expected.scope) { throw 'Azure role assignment response does not match the approved scope.' }
+    }
+    'EntraApplication' {
+      $fields = @('displayName')
+      if (-not (Test-MaesterSetupDesiredState -Actual $observed -Desired $ResolvedBody)) { throw 'Application creation returned identity tuple or configuration differs from the approved values.' }
+    }
+    'EntraServicePrincipal' { $fields = @('appId','appOwnerOrganizationId') }
+    'ExchangeServicePrincipal' {
+      if ((Get-MaesterSetupProperty $Response 'ObjectId') -ine $Ownership.Expected.servicePrincipalId -or (Get-MaesterSetupProperty $Response 'AppId') -ine $Ownership.Expected.appId) { throw 'Exchange returned identity tuple does not match the approved service principal.' }
+    }
+    'ExchangeRoleAssignment' {
+      $matches = @(Get-ManagementRoleAssignment -RoleAssignee $Ownership.Expected.servicePrincipalId -ErrorAction Stop | Where-Object { [string]$_.Identity -ceq $ExactIds.exchangeRoleAssignmentId -and [string]$_.Role -ceq $Ownership.Expected.roleName })
+      if ($matches.Count -ne 1) { throw 'Exchange returned identity tuple could not be verified in the exact principal role inventory.' }
+    }
+    'OAuth2PermissionGrant' {
+      if ($Operation.method -ceq 'PATCH') { $observed = Invoke-GraphRestRequest -Method GET -Uri $Operation.uri }
+      if ((Get-MaesterSetupProperty $observed 'id') -cne $ExactIds.grantId) { throw 'Delegated grant readback does not match the checkpointed exact grant ID.' }
+      if ($Ownership.Expected.consentType -ceq 'AllPrincipals' -and $null -ne (Get-MaesterSetupProperty $observed 'principalId')) { throw 'Delegated grant readback has a principal on an AllPrincipals grant.' }
+      $fields = @('clientId','resourceId','consentType')
+      $scopes = @(([string](Get-MaesterSetupProperty $observed 'scope' '')) -split '\s+' | Where-Object { $_ } | Sort-Object -Unique)
+      if (($scopes -join ' ') -cne (@($Ownership.After.scopes | Sort-Object -Unique) -join ' ')) { throw 'Delegated grant readback does not match the approved scopes.' }
+    }
+    'ApplicationConfiguration' {
+      $observed = Invoke-GraphRestRequest -Method GET -Uri $Operation.uri
+      if ((Get-MaesterSetupProperty $observed 'id') -ine $ExactIds.applicationObjectId -or (Get-MaesterSetupProperty $observed 'appId') -ine $Ownership.Expected.appId -or -not (Test-MaesterSetupDesiredState -Actual $observed -Desired $ResolvedBody)) { throw 'Application configuration readback does not match the approved exact target and values.' }
+    }
+    'WebAppAuthConfiguration' {
+      $observed = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$($Operation.uri)" -Headers $PlanParameters.ArmHeaders
+      if (-not (Test-MaesterSetupDesiredState -Actual $observed -Desired $ResolvedBody)) { throw 'Web App authentication readback does not match the approved values.' }
+    }
+  }
+  foreach ($field in $fields) {
+    $value = Get-MaesterSetupProperty $observed $field
+    if ($null -eq $value -or [string]$value -ine [string]$Ownership.Expected[$field]) { throw "Provider returned identity tuple differs from the approved $field." }
+  }
+}
+
+function Get-MaesterSetupLegacyReceipts {
+  param($Session, [string]$PrincipalObjectId)
+  $receipts = @{ EXO_APPROLE_ASSIGNMENT_IDS = @(); TEAMS_READER_ROLE_ASSIGNMENT_IDS = @(); AZURE_ROLE_ASSIGNMENT_IDS = @() }
+  foreach ($record in @((Get-MaesterOwnershipJournal -Session $Session).records)) {
+    if ($record.ownership -cne 'Created' -or $record.state -cne 'applied' -or (Get-MaesterSetupProperty $record.expected 'principalId') -ine $PrincipalObjectId) { continue }
+    if ($record.kind -ceq 'GraphAppRoleAssignment' -and $record.expected.appRoleId -ceq 'dc50a0fb-09a3-484d-be87-e023b12c6440') { $receipts.EXO_APPROLE_ASSIGNMENT_IDS += $record.exactIds.assignmentId }
+    elseif ($record.kind -ceq 'DirectoryRoleAssignment') { $receipts.TEAMS_READER_ROLE_ASSIGNMENT_IDS += $record.exactIds.assignmentId }
+    elseif ($record.kind -ceq 'AzureRoleAssignment') { $receipts.AZURE_ROLE_ASSIGNMENT_IDS += $record.exactIds.roleAssignmentId }
+  }
+  return $receipts
+}
+
 function Invoke-MaesterSetupAccessPlan {
   [CmdletBinding()]
-  param([Parameter(Mandatory)][hashtable]$PlanParameters, [Parameter(Mandatory)][string]$ApprovedPlanHash)
-  # Read every selected authority again before the first write; stale reviews do
-  # not authorize new roles, identities, applications, groups, or consent scopes.
+  param([Parameter(Mandatory)][hashtable]$PlanParameters, [Parameter(Mandatory)][string]$ApprovedPlanHash, $OwnershipSession)
+  # The entrypoint holds the lifecycle lock and revalidates ARM targets before
+  # entering this fresh authority inventory. Plan-only callers never open it.
   $plan = Get-MaesterSetupAccessPlan @PlanParameters
   if ($ApprovedPlanHash -cne $plan.planHash) { throw 'Setup access changed after review. Generate and approve the new plan before applying.' }
   Assert-MaesterConsentPlanApproval -Plan $plan -ApprovedPlanHash $ApprovedPlanHash
+  if ($null -eq $OwnershipSession) { throw 'An open deployment ownership journal session is required before setup writes.' }
+  $journal = Get-MaesterOwnershipJournal -Session $OwnershipSession
+  if ($journal.binding.tenantId -ine $PlanParameters.TenantId -or $journal.binding.subscriptionId -ine $PlanParameters.SubscriptionId -or
+      $journal.binding.setupClientId -ine $plan.details.setupClientId -or $journal.binding.runtimeResourceId -ine $PlanParameters.ResourceId -or
+      $journal.binding.runtimePrincipalId -ine $PlanParameters.PrincipalObjectId) { throw 'Setup ownership journal does not match the reviewed deployment target.' }
+  if (@($journal.records | Where-Object { $_.state -in @('pending', 'deleting', 'conflict') }).Count) { throw 'Unresolved ownership operations require exact reconciliation before further setup writes.' }
   $graphPlan = $plan.details.graphPlan
   $grantScript = Join-Path $PSScriptRoot 'vendor/Azd.MaesterHooks/Grant-MaesterGraphPermissions.ps1'
   $null = & $grantScript -TenantId $PlanParameters.TenantId -PrincipalObjectId $PlanParameters.PrincipalObjectId `
     -PermissionProfile $PlanParameters.PermissionProfile -IncludeMailSend $PlanParameters.IncludeMailSend `
-    -IncludeReportSettingsWrite $PlanParameters.IncludeReportSettingsWrite -Apply -ApprovedPlanHash $graphPlan.planHash
-  $receipts = @{ EXO_APPROLE_ASSIGNMENT_IDS = @(); TEAMS_READER_ROLE_ASSIGNMENT_IDS = @(); AZURE_ROLE_ASSIGNMENT_IDS = @() }
+    -IncludeReportSettingsWrite $PlanParameters.IncludeReportSettingsWrite -Apply -ApprovedPlanHash $graphPlan.planHash -OwnershipSession $OwnershipSession
   # Keep the reviewed, hashed plan immutable; resolved IDs are execution output.
   $easyAuth = if ($plan.details.easyAuth) { $plan.details.easyAuth | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable } else { $null }
   foreach ($plannedOperation in @($plan.details.operations)) {
     $operation = $plannedOperation | ConvertTo-Json -Depth 30 -Compress | ConvertFrom-Json -AsHashtable
     $body = $operation.body | ConvertTo-Json -Depth 30 -Compress
-    if ($easyAuth) {
-      $body = $body.Replace('{easyAuthClientId}', [string]$easyAuth.clientId).Replace('{easyAuthPrincipalId}', [string]$easyAuth.principalId)
-    }
+    if ($easyAuth) { $body = $body.Replace('{easyAuthClientId}', [string]$easyAuth.clientId).Replace('{easyAuthPrincipalId}', [string]$easyAuth.principalId) }
     if ($body -match '\{easyAuth(Client|Principal)Id\}') { throw 'Easy Auth creation did not return the expected exact identifiers.' }
+    $resolvedBody = $body | ConvertFrom-Json -AsHashtable
+    $ownership = Get-MaesterSetupOperationOwnership -Session $OwnershipSession -Operation $operation -Body $resolvedBody -Plan $plan -EasyAuth $easyAuth
+    $operationKey = 'setup-' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($plannedOperation | ConvertTo-Json -Depth 30 -Compress)))).ToLowerInvariant()
+    # ARM assignment names are fixed before the request, so a failed response
+    # still leaves the exact intended target. Unknown POST results stay pending.
+    $requestUri = $operation.uri.Replace('{assignmentId}', [guid]::NewGuid().ToString())
+    if ($ownership.Kind -ceq 'AzureRoleAssignment') { $ownership.Expected['roleAssignmentId'] = $requestUri.Split('?')[0] }
+    $ownedOperation = Start-MaesterOwnedOperation -Session $OwnershipSession -Key $operationKey -PlanHash $plan.planHash @ownership
     $response = $null
     switch ($operation.method) {
-      'New-ServicePrincipal' { $parameters = $operation.body; $response = New-ServicePrincipal @parameters -ErrorAction Stop }
-      'New-ManagementRoleAssignment' { $parameters = $operation.body; $response = New-ManagementRoleAssignment @parameters -ErrorAction Stop }
+      'New-ServicePrincipal' { $response = New-ServicePrincipal @resolvedBody -ErrorAction Stop }
+      'New-ManagementRoleAssignment' { $response = New-ManagementRoleAssignment @resolvedBody -ErrorAction Stop }
       default {
-        if ($operation.uri.StartsWith('https://graph.microsoft.com/')) {
-          $response = Invoke-GraphRestRequest -Method $operation.method -Uri $operation.uri -Body $body -ContentType 'application/json'
+        if ($requestUri.StartsWith('https://graph.microsoft.com/')) {
+          $response = Invoke-GraphRestRequest -Method $operation.method -Uri $requestUri -Body $body -ContentType 'application/json'
         } else {
-          $uri = $operation.uri.Replace('{assignmentId}', [guid]::NewGuid().ToString())
-          $response = Invoke-RestMethod -Method $operation.method -Uri "https://management.azure.com$uri" -Headers $PlanParameters.ArmHeaders -Body $body -ContentType 'application/json'
+          $response = Invoke-RestMethod -Method $operation.method -Uri "https://management.azure.com$requestUri" -Headers $PlanParameters.ArmHeaders -Body $body -ContentType 'application/json'
         }
       }
     }
+    $exactIds = Get-MaesterSetupOperationExactIds -Ownership $ownership -Operation $operation -Response $response -RequestUri $requestUri -EasyAuth $easyAuth
+    Complete-MaesterOwnedOperation -Session $OwnershipSession -OperationId $ownedOperation.operationId -ExactIds $exactIds | Out-Null
+    try {
+      Assert-MaesterSetupOperationResult -Ownership $ownership -Operation $operation -Response $response -ExactIds $exactIds -ResolvedBody $resolvedBody -PlanParameters $PlanParameters
+    } catch {
+      Set-MaesterOwnedOperationState -Session $OwnershipSession -OperationId $ownedOperation.operationId -State conflict | Out-Null
+      throw
+    }
     switch ($operation.receipt) {
-      'EasyAuthApplication' {
-        if (-not $response.id -or -not $response.appId) { throw 'Easy Auth application creation returned no identifiers.' }
-        $easyAuth.objectId = [string]$response.id; $easyAuth.clientId = [string]$response.appId
-      }
-      'EasyAuthPrincipal' {
-        if (-not $response.id -or $response.appId -ine $easyAuth.clientId) { throw 'Easy Auth service principal creation returned the wrong application.' }
-        $easyAuth.principalId = [string]$response.id
-      }
-      { $_ -in $receipts.Keys } {
-        if (-not $response.id) { throw 'Permission write returned no assignment receipt.' }
-        $receipts[$operation.receipt] += [string]$response.id
-      }
+      'EasyAuthApplication' { $easyAuth.objectId = $exactIds.applicationObjectId; $easyAuth.clientId = $exactIds.appId }
+      'EasyAuthPrincipal' { $easyAuth.principalId = $exactIds.servicePrincipalId }
     }
   }
+  # Compatibility summaries are derived from all persisted owned entries, never
+  # just this invocation's delta. A no-op rerun cannot erase earlier ownership.
+  $receipts = Get-MaesterSetupLegacyReceipts -Session $OwnershipSession -PrincipalObjectId $PlanParameters.PrincipalObjectId
   [pscustomobject]@{ Plan = $plan; Receipts = $receipts; EasyAuth = $easyAuth; PrincipalDisplayName = $plan.details.inventory.principal.displayName }
 }
 

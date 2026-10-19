@@ -133,6 +133,18 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
   function Get-AzCliAccessToken { }
   function ConvertTo-BoolOrDefault { param($Value, $Default) if ($Value) { return $Value -eq 'true' }; return $Default }
   function Assert-GraphAccess { }
+  function Assert-MaesterConsentPlanApproval { param($Plan,$ApprovedPlanHash); if ($Plan.planHash -ne $ApprovedPlanHash) { throw 'Offline consent mismatch' } }
+  function Register-MaesterExternalSetupStarted { $global:upgradeFixture.SetupMarkerWritten = $true }
+  function Open-MaesterOwnershipJournal {
+    param($ProjectRoot, $Binding, [switch]$RequireExisting)
+    $global:upgradeFixture.SetupMarkerWritten | Should -BeTrue
+    $global:upgradeFixture.JournalOpen = @{ ProjectRoot = $ProjectRoot; Binding = $Binding; RequireExisting = [bool]$RequireExisting }
+    $global:upgradeFixture.JournalSessionActive = $true
+    if ($global:upgradeFixture['BeforeJournalOpen']) { & $global:upgradeFixture['BeforeJournalOpen'] $global:upgradeFixture }
+    $session = [pscustomobject]@{}
+    $session | Add-Member ScriptMethod Dispose { $global:upgradeFixture.JournalSessionActive = $false }
+    $session
+  }
   function Get-MaesterSetupScopes { @('Application.Read.All') }
   function Get-MaesterSetupAccessPlan { [pscustomobject]@{ planHash = 'fixture-approved-plan'; capability = 'DeploymentSetupAccess' } }
   function Invoke-MaesterSetupAccessPlan { }
@@ -237,10 +249,11 @@ Describe 'Existing upgrade postdeployment preservation' {
   BeforeEach {
     $script:savedLocation = Get-Location
     $script:savedEnvironment = @{}
-    foreach ($name in @('AZURE_ENV_NAME', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION', 'AUTOMATION_ADOPT_SOLUTION_TAG', 'INCLUDE_EXCHANGE', 'INCLUDE_TEAMS', 'INCLUDE_AZURE')) {
+    foreach ($name in @('AZURE_ENV_NAME', 'AUTOMATION_EXISTING_RESOURCES', 'AUTOMATION_UPGRADE_PRESERVE_ACCESS', 'AUTOMATION_VALIDATE_RUNBOOK_ON_PROVISION', 'AUTOMATION_ADOPT_SOLUTION_TAG', 'INCLUDE_EXCHANGE', 'INCLUDE_TEAMS', 'INCLUDE_AZURE', 'MAESTER_SETUP_CLIENT_ID')) {
       $script:savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
       Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
+    $env:MAESTER_SETUP_CLIENT_ID = '99999999-9999-4999-8999-999999999999'
     Import-UpgradeFixture
     Mock Import-Module { }
     Mock Get-AzCliSubscriptionContext { [pscustomobject]@{ tenantId = 'tenant-test' } }
@@ -357,6 +370,46 @@ Describe 'Existing upgrade postdeployment preservation' {
       else { [Environment]::SetEnvironmentVariable($name, $script:savedEnvironment[$name]) }
     }
     $global:LASTEXITCODE = 0
+  }
+
+  It 'holds the existing ownership lifecycle session through preserve-access publication and retains the journal bytes' {
+    $fixture = $global:upgradeFixture
+    $directory = Join-Path $fixture.Root '.azure/test'
+    $null = New-Item -ItemType Directory -Path $directory -Force
+    $journalPath = Join-Path $directory 'maester-setup-ownership.json'
+    # The ownership module is an explicit boundary in these publication tests;
+    # real file schema, locking and checkpoints are covered by SetupConsent.
+    Set-Content -LiteralPath $journalPath -Value 'existing-owned-records'
+    $before = [IO.File]::ReadAllBytes($journalPath)
+    $fixture.BeforeContentRead = {
+      param($f)
+      $f.JournalSessionActive | Should -BeTrue
+    }
+
+    Invoke-UpgradeSetup
+
+    Assert-UpgradeNoWrites
+    $fixture.JournalOpen.RequireExisting | Should -BeTrue
+    $fixture.JournalOpen.ProjectRoot | Should -BeExactly $fixture.Root
+    $fixture.JournalOpen.Binding.runtimeResourceId | Should -BeExactly $fixture.Account.id
+    $fixture.JournalOpen.Binding.runtimePrincipalId | Should -BeExactly $fixture.Account.identity.principalId
+    $fixture.JournalSessionActive | Should -BeFalse
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath)) | Should -BeExactly ([Convert]::ToBase64String($before))
+  }
+
+  It 'revalidates runtime identity after taking an existing preserve-access session and releases it on failure' {
+    $fixture = $global:upgradeFixture
+    $directory = Join-Path $fixture.Root '.azure/test'
+    $null = New-Item -ItemType Directory -Path $directory -Force
+    Set-Content -LiteralPath (Join-Path $directory 'maester-setup-ownership.json') -Value 'existing-owned-records'
+    $fixture.BeforeJournalOpen = { param($f) $f.Account.identity.principalId = '44444444-4444-4444-8444-444444444444' }
+
+    { Invoke-UpgradeSetup } | Should -Throw '*managed identity*'
+
+    Assert-UpgradeNoWrites
+    $fixture.JournalOpen.RequireExisting | Should -BeTrue
+    $fixture.JournalSessionActive | Should -BeFalse
+    $fixture.ContentReads | Should -Be 0
   }
 
   It 'returns the reviewed-access plan before uploads grants or receipts when Apply is absent' {
@@ -991,8 +1044,9 @@ Describe 'Existing upgrade postdeployment preservation' {
     Invoke-UpgradeSetup
     $firstWrite = $global:upgradeFixture.Calls.FindIndex([Predicate[string]]{ param($call) $call -match '^(PUT|POST) |^azd env set' })
     $firstWrite | Should -BeGreaterThan 0
+    # The initial review and the fresh under-lock validation both precede writes.
     foreach ($segment in @('jobSchedules', 'schedules', 'runbooks')) {
-      @($global:upgradeFixture.Calls.GetRange(0, $firstWrite) | Where-Object { [regex]::IsMatch($_, "^GET .*/$segment\?api-version=", [Text.RegularExpressions.RegexOptions]::IgnoreCase) }).Count | Should -Be 1
+      @($global:upgradeFixture.Calls.GetRange(0, $firstWrite) | Where-Object { [regex]::IsMatch($_, "^GET .*/$segment\?api-version=", [Text.RegularExpressions.RegexOptions]::IgnoreCase) }).Count | Should -Be 2
     }
   }
 

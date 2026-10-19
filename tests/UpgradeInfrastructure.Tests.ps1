@@ -89,6 +89,8 @@ BeforeAll {
       # Guard behavior is covered using real helpers in TargetGuardEntrypoints.Tests.ps1.
       function Get-AzCliSubscriptionContext { param($SubscriptionId, $TenantId) [pscustomobject]@{ id = $SubscriptionId; tenantId = $TenantId; state = 'Enabled' } }
       function Invoke-MaesterPreProvision { param($SolutionName, $SubscriptionId, $TenantId, $Location) }
+      # Infrastructure ownership has its own HTTP/status/receipt test suite; this harness isolates existing Automation guards.
+      function Initialize-MaesterInfrastructureOwnership { param($ProjectRoot, $EnvironmentName, $SolutionName, $TenantId, $SubscriptionId) }
       function azd {
         $global:maesterUpgradeCalls.Add("azd $($args -join ' ')")
         $global:LASTEXITCODE = 0

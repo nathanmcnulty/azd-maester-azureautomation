@@ -328,11 +328,12 @@ function Invoke-GraphRestRequest {
 }
 Export-ModuleMember -Function Assert-GraphAccess, Get-MaesterSetupScopes, Invoke-GraphRestRequest
 '@
-    Set-Content (Join-Path $root 'scripts/vendor/Azd.MaesterHooks/Maester-ConsentPlan.psm1') '# Consent is covered by SetupConsent.Tests.ps1'
+    Set-Content (Join-Path $root 'scripts/vendor/Azd.MaesterHooks/Maester-ConsentPlan.psm1') 'function Assert-MaesterConsentPlanApproval { param($Plan,$ApprovedPlanHash); if ($Plan.planHash -ne $ApprovedPlanHash) { throw "Offline consent mismatch" } }; Export-ModuleMember -Function *'
+    Set-Content (Join-Path $root 'scripts/vendor/Azd.MaesterHooks/Maester-InfrastructureOwnership.psm1') 'function Register-MaesterExternalSetupStarted { }; Export-ModuleMember -Function *'
     Set-Content (Join-Path $root 'scripts/Maester-SetupConsent.psm1') @'
 function Get-MaesterSetupAccessPlan { [pscustomobject]@{ planHash = 'fixture-approved-plan' } }
 function Invoke-MaesterSetupAccessPlan {
-  param($PlanParameters, $ApprovedPlanHash)
+  param($PlanParameters, $ApprovedPlanHash, $OwnershipSession)
   if ($ApprovedPlanHash -ne 'fixture-approved-plan') { throw 'Offline setup approval mismatch' }
   $global:targetGuard.GraphGrants++
   if ($PlanParameters.IncludeExchange) {
@@ -343,6 +344,7 @@ function Invoke-MaesterSetupAccessPlan {
 }
 Export-ModuleMember -Function *
 '@
+    $env:MAESTER_SETUP_CLIENT_ID = '99999999-9999-4999-8999-999999999999'
     $f = $global:targetGuard; $f.AllowSetup = $true
     $exchangeEnabled = $ExchangeMode -ne 'disabled'
     if ($exchangeEnabled) {
@@ -408,11 +410,11 @@ Export-ModuleMember -Function *
     $f.CachedDefault.id | Should -BeExactly $script:guardOther
   }
 
-  It 'runs actual preup resource group creation only after fresh explicit target validation' {
+  It 'validates the actual preup target and defers creation to ownership-aware preprovision' {
     $f = $global:targetGuard; $f.AllowGroupCreate = $true
     Invoke-GuardEntrypoint -Name 'Run-AzdPreUp.ps1'
-    $f.Writes.Count | Should -Be 1
-    $f.Writes[0] | Should -Match "^az group create --name rg-guard --location westus2 --subscription $script:guardSub"
+    $f.Writes.Count | Should -Be 0
+    @($f.Cli | Where-Object { $_ -match "^group exists --name rg-guard --subscription $script:guardSub" }).Count | Should -Be 1
     $f.Cli[0] | Should -Match '^rest '
     ($f.Cli -join '|') | Should -Not -Match 'account set|account list|account show|login'
     $f.CachedDefault.id | Should -BeExactly $script:guardOther
