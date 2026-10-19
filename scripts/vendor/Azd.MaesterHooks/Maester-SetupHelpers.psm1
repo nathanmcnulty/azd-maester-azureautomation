@@ -271,7 +271,7 @@ function Import-MaesterGraphCoordinator {
   $sourcePath = Join-Path $PSScriptRoot '../graph-delegated-authentication/Azd.GraphAuthentication.psd1'
   $modulePath = if (Test-Path -LiteralPath $vendorPath) { $vendorPath } else { $sourcePath }
   if (-not (Test-Path -LiteralPath $modulePath)) {
-    throw 'Synchronize graph-delegated-authentication 1.0.0 alongside maester-azd-hooks before setup.'
+    throw 'Synchronize graph-delegated-authentication 1.1.0 alongside maester-azd-hooks before setup.'
   }
   Import-Module $modulePath -ErrorAction Stop
 }
@@ -303,6 +303,7 @@ function Assert-GraphAccess {
     ExpectedClientId = $clientGuid
     ExpectedAccount = $ExpectedAccount
     Environment = 'Global'
+    ContextScope = 'Process'
     Scopes = $requiredScopes
     ProbeUri = '/v1.0/organization?$select=id&$top=1'
     AllowInteractive = $AllowInteractive
@@ -329,6 +330,7 @@ function Assert-GraphAccess {
     ExpectedClientId = $clientGuid
     ExpectedAccount = $ExpectedAccount
     Environment = 'Global'
+    ContextScope = 'Process'
     Scopes = $requiredScopes
     ProbeUri = '/v1.0/organization?$select=id&$top=1'
   }
@@ -338,6 +340,15 @@ function Test-MaesterGraphSession {
   [CmdletBinding()]
   param([Parameter(Mandatory)][string]$TenantId)
   return $null -ne $script:MaesterGraphSession -and $TenantId -ieq $script:MaesterGraphSession.TenantId.ToString()
+}
+
+function Get-MaesterGraphSetupClientId {
+  [CmdletBinding()]
+  param([Parameter(Mandatory)][string]$TenantId)
+  if (-not (Test-MaesterGraphSession -TenantId $TenantId)) {
+    throw 'The selected tenant must have a verified setup session before identifying its setup client.'
+  }
+  return $script:MaesterGraphSession.ExpectedClientId.ToString()
 }
 
 function Invoke-GraphRestRequest {
@@ -364,7 +375,7 @@ function Invoke-GraphRestRequest {
     throw 'Graph requests must target an absolute HTTPS Microsoft Graph URI.'
   }
   # No reconnect or context replacement at a write boundary. A changed client,
-  # account, tenant, cloud or scope set fails closed before the request.
+  # account, tenant, cloud, context scope or scope set fails closed before the request.
   $null = Connect-AzdGraphSession @script:MaesterGraphSession
   $invokeParams = @{ Method = $Method; Uri = $Uri; OutputType = 'PSObject'; ErrorAction = 'Stop' }
   if ($PSBoundParameters.ContainsKey('Body') -and $null -ne $Body) {

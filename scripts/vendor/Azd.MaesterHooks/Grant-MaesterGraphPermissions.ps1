@@ -1,3 +1,5 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'ExpectedFederatedCredentialIssuer', Justification = 'The federation issuer is a nonsecret trust identifier included in the approval plan, not credential material.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'ExpectedFederatedCredentialSubject', Justification = 'The federation subject is a nonsecret trust identifier included in the approval plan, not credential material.')]
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
@@ -20,8 +22,18 @@ param(
 
   [switch]$Apply,
 
-  [string]$ApprovedPlanHash
+  [string]$ApprovedPlanHash,
+
+  [ValidateSet('ManagedIdentity', 'FederatedApplication')]
+  [string]$TargetType = 'ManagedIdentity',
+
+  [string]$ExpectedApplicationId,
+  [string]$ExpectedApplicationObjectId,
+  [string]$ExpectedFederatedCredentialIssuer,
+  [string]$ExpectedFederatedCredentialSubject
 )
+
+$TargetType = if ($TargetType -ieq 'FederatedApplication') { 'FederatedApplication' } else { 'ManagedIdentity' }
 
 $manifestPath = Join-Path $PSScriptRoot 'Maester-GraphPermissions.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable
@@ -77,9 +89,131 @@ function Get-MaesterGraphAssignmentList {
     foreach ($assignment in @($page.value)) {
       $assignments.Add($assignment)
     }
-    $nextUri = if ($page.PSObject.Properties['@odata.nextLink']) { [string]$page.'@odata.nextLink' } else { $null }
+    if ($page.PSObject.Properties['@odata.nextLink'] -and $null -ne $page.'@odata.nextLink' -and $page.'@odata.nextLink' -isnot [string]) {
+      throw 'Graph collection continuation must be a string or null.'
+    }
+    $nextUri = if ($page.PSObject.Properties['@odata.nextLink']) { $page.'@odata.nextLink' } else { $null }
   }
   return $assignments.ToArray()
+}
+
+# Runtime applications are an explicit opt-in contract. The host must bind the
+# expected app and federation to its own deployment endpoint before calling us.
+function Get-MaesterFederatedCredentialInventory {
+  param([string]$TenantId, [string]$ApplicationObjectId)
+  $collectionUri = "https://graph.microsoft.com/v1.0/applications/$ApplicationObjectId/federatedIdentityCredentials"
+  $nextUri = $collectionUri
+  $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $trusts = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $credentials = [Collections.Generic.List[object]]::new()
+  while ($nextUri) {
+    $pageUri = $null
+    if (-not [uri]::TryCreate($nextUri, [UriKind]::Absolute, [ref]$pageUri) -or
+        $pageUri.Scheme -cne 'https' -or $pageUri.Host -ine 'graph.microsoft.com' -or
+        $pageUri.Port -ne 443 -or $pageUri.UserInfo -or $pageUri.Fragment -or
+        $pageUri.AbsolutePath -cne ([uri]$collectionUri).AbsolutePath) {
+      throw 'Federated credential continuation does not target the expected secure collection.'
+    }
+    if ($visited.Count -ge 100 -or -not $visited.Add($nextUri)) {
+      throw 'Federated credential pagination exceeded its limit or repeated a page.'
+    }
+    $page = Invoke-GraphRestRequest -Method GET -Uri $nextUri -TenantId $TenantId
+    if ($null -eq $page -or -not $page.PSObject.Properties['value'] -or $page.value -isnot [array]) {
+      throw 'Federated credential response is missing its value array.'
+    }
+    foreach ($credential in $page.value) {
+      foreach ($property in @('id', 'name', 'issuer', 'subject')) {
+        if ($null -eq $credential -or -not $credential.PSObject.Properties[$property] -or
+            $credential.$property -isnot [string] -or [string]::IsNullOrWhiteSpace($credential.$property)) {
+          throw "Federated credential inventory contains a missing or malformed $property."
+        }
+      }
+      if (-not $credential.PSObject.Properties['audiences'] -or $credential.audiences -isnot [array] -or
+          $credential.audiences.Count -ne 1 -or
+          @($credential.audiences | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count) {
+        throw 'Federated credential inventory contains malformed audiences; exactly one non-empty audience is required.'
+      }
+      if (-not $ids.Add($credential.id)) { throw 'Federated credential inventory contains a duplicate credential ID.' }
+      if (-not $names.Add($credential.name)) { throw 'Federated credential inventory contains a duplicate credential name.' }
+      $trustKey = '{0}:{1}{2}:{3}' -f $credential.issuer.Length, $credential.issuer, $credential.subject.Length, $credential.subject
+      if (-not $trusts.Add($trustKey)) { throw 'Federated credential inventory contains a duplicate issuer and subject trust.' }
+      $credentials.Add([ordered]@{
+        id = $credential.id; name = $credential.name; issuer = $credential.issuer
+        subject = $credential.subject; audiences = @($credential.audiences | Sort-Object -CaseSensitive)
+      })
+    }
+    if ($page.PSObject.Properties['@odata.nextLink'] -and $null -ne $page.'@odata.nextLink' -and $page.'@odata.nextLink' -isnot [string]) {
+      throw 'Graph collection continuation must be a string or null.'
+    }
+    $nextUri = if ($page.PSObject.Properties['@odata.nextLink']) { $page.'@odata.nextLink' } else { $null }
+  }
+  return @($credentials.ToArray() | Sort-Object { $_.id })
+}
+
+function Get-MaesterExistingCredentialMetadata {
+  param($Object, [string]$OwnerType)
+  foreach ($type in @('keyCredentials', 'passwordCredentials')) {
+    if ($null -eq $Object -or -not $Object.PSObject.Properties[$type] -or $Object.$type -isnot [array]) {
+      throw "Runtime $OwnerType response is missing its $type inventory."
+    }
+    $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($credential in $Object.$type) {
+      $keyId = [guid]::Empty
+      if ($null -eq $credential -or -not $credential.PSObject.Properties['keyId'] -or
+          $credential.keyId -isnot [string] -or
+          -not [guid]::TryParse($credential.keyId, [ref]$keyId) -or $keyId -eq [guid]::Empty -or
+          -not $ids.Add($keyId.ToString())) {
+        throw "Runtime $OwnerType $type inventory contains a missing, invalid or duplicate keyId."
+      }
+      foreach ($dateName in @('startDateTime', 'endDateTime')) {
+        $parsedDate = [DateTimeOffset]::MinValue
+        if (-not $credential.PSObject.Properties[$dateName] -or
+            ($credential.$dateName -isnot [string] -and $credential.$dateName -isnot [datetime] -and $credential.$dateName -isnot [DateTimeOffset]) -or
+            -not [DateTimeOffset]::TryParse([string]$credential.$dateName, [ref]$parsedDate)) {
+          throw "Runtime $OwnerType $type inventory contains a missing or invalid $dateName."
+        }
+      }
+      # Deliberately exclude secretText, certificate material, hints and display names.
+      [ordered]@{
+        ownerType = $OwnerType; type = $type; keyId = $keyId.ToString()
+        startDateTime = ([DateTimeOffset]::Parse([string]$credential.startDateTime)).ToUniversalTime().ToString('o')
+        endDateTime = ([DateTimeOffset]::Parse([string]$credential.endDateTime)).ToUniversalTime().ToString('o')
+      }
+    }
+  }
+}
+
+function Assert-MaesterGraphStringProperties {
+  param($Object, [string[]]$Properties)
+  foreach ($property in $Properties) {
+    if ($null -eq $Object -or -not $Object.PSObject.Properties[$property] -or
+        $Object.$property -isnot [string] -or [string]::IsNullOrWhiteSpace($Object.$property)) {
+      throw "Runtime identity response contains a missing or malformed $property."
+    }
+  }
+}
+
+$federationParameters = @('ExpectedApplicationId', 'ExpectedApplicationObjectId', 'ExpectedFederatedCredentialIssuer', 'ExpectedFederatedCredentialSubject')
+if ($TargetType -ceq 'ManagedIdentity' -and @($federationParameters | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count) {
+  throw 'Federated application parameters require explicit TargetType FederatedApplication.'
+}
+if ($TargetType -ceq 'FederatedApplication') {
+  foreach ($name in @('TenantId', 'ExpectedApplicationId', 'ExpectedApplicationObjectId')) {
+    $value = [guid]::Empty
+    if (-not [guid]::TryParse([string](Get-Variable -Name $name -ValueOnly), [ref]$value) -or $value -eq [guid]::Empty) {
+      throw "$name must be a non-empty GUID for a federated application target."
+    }
+    Set-Variable -Name $name -Value $value.ToString()
+  }
+  $issuerUri = $null
+  if (-not [uri]::TryCreate($ExpectedFederatedCredentialIssuer, [UriKind]::Absolute, [ref]$issuerUri) -or
+      $issuerUri.Scheme -cne 'https' -or $issuerUri.Port -ne 443 -or $issuerUri.UserInfo -or $issuerUri.Query -or $issuerUri.Fragment -or
+      $ExpectedFederatedCredentialIssuer -cmatch '\s' -or
+      [string]::IsNullOrWhiteSpace($ExpectedFederatedCredentialSubject) -or $ExpectedFederatedCredentialSubject -cmatch '[\x00-\x1f\x7f]') {
+    throw 'A federated application target requires an exact HTTPS issuer and non-empty subject without control characters.'
+  }
 }
 
 if ([string]::IsNullOrWhiteSpace($TenantId)) { throw 'TenantId must identify the selected deployment tenant.' }
@@ -96,9 +230,51 @@ if (-not (Test-MaesterGraphSession -TenantId $TenantId)) {
   Assert-GraphAccess -TenantId $TenantId -Scopes (Get-MaesterSetupScopes)
 }
 Import-Module (Join-Path $PSScriptRoot 'Maester-ConsentPlan.psm1') -Force
-$principal = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/${PrincipalObjectId}?`$select=id,appId,servicePrincipalType" -TenantId $TenantId
-if ([string]$principal.id -ine $PrincipalObjectId -or [string]$principal.servicePrincipalType -cne 'ManagedIdentity') {
-  throw 'Assessment application roles may only target the explicitly selected managed identity, never the setup client.'
+$principalSelect = 'id,appId,servicePrincipalType'
+if ($TargetType -ceq 'FederatedApplication') { $principalSelect += ',appOwnerOrganizationId,keyCredentials,passwordCredentials' }
+$principal = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/${PrincipalObjectId}?`$select=$principalSelect" -TenantId $TenantId
+Assert-MaesterGraphStringProperties -Object $principal -Properties @('id', 'appId', 'servicePrincipalType')
+$targetProvenance = [ordered]@{ targetType = $TargetType; applicationId = $principal.appId }
+if ($TargetType -ceq 'ManagedIdentity') {
+  if ([string]$principal.id -ine $PrincipalObjectId -or [string]$principal.servicePrincipalType -cne 'ManagedIdentity') {
+    throw 'Assessment application roles may only target the explicitly selected managed identity, never the setup client.'
+  }
+} else {
+  Assert-MaesterGraphStringProperties -Object $principal -Properties @('appOwnerOrganizationId')
+  $setupClientId = Get-MaesterGraphSetupClientId -TenantId $TenantId
+  if ($ExpectedApplicationId -ieq $setupClientId) { throw 'The runtime application must never be the verified setup client.' }
+  if ([string]$principal.id -ine $PrincipalObjectId -or [string]$principal.servicePrincipalType -cne 'Application' -or
+      [string]$principal.appId -ine $ExpectedApplicationId -or [string]$principal.appOwnerOrganizationId -ine $TenantId) {
+    throw 'The federated runtime service principal must match the explicit application and belong to the selected tenant.'
+  }
+  $application = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications/${ExpectedApplicationObjectId}?`$select=id,appId,signInAudience,keyCredentials,passwordCredentials" -TenantId $TenantId
+  Assert-MaesterGraphStringProperties -Object $application -Properties @('id', 'appId', 'signInAudience')
+  if ([string]$application.id -ine $ExpectedApplicationObjectId -or [string]$application.appId -ine $ExpectedApplicationId -or
+      [string]$application.signInAudience -cne 'AzureADMyOrg') {
+    throw 'The federated runtime application must match the explicit object/client IDs and be single-tenant.'
+  }
+  $existingCredentials = @(
+    Get-MaesterExistingCredentialMetadata -Object $application -OwnerType 'application'
+    Get-MaesterExistingCredentialMetadata -Object $principal -OwnerType 'servicePrincipal'
+  ) | Sort-Object { $_.ownerType }, { $_.type }, { $_.keyId }
+  $federatedCredentials = @(Get-MaesterFederatedCredentialInventory -TenantId $TenantId -ApplicationObjectId $ExpectedApplicationObjectId)
+  $matchingCredentials = @($federatedCredentials | Where-Object {
+    $_.issuer -ceq $ExpectedFederatedCredentialIssuer -and $_.subject -ceq $ExpectedFederatedCredentialSubject -and
+    $_.audiences.Count -eq 1 -and $_.audiences[0] -ceq 'api://AzureADTokenExchange'
+  })
+  if ($matchingCredentials.Count -ne 1) {
+    throw 'Exactly one federated credential must match the expected issuer, subject and single token-exchange audience.'
+  }
+  $targetProvenance = [ordered]@{
+    targetType = $TargetType; applicationId = $ExpectedApplicationId; applicationObjectId = $ExpectedApplicationObjectId
+    appOwnerOrganizationId = $TenantId; signInAudience = 'AzureADMyOrg'
+    selectedFederatedCredentialId = $matchingCredentials[0].id
+    expectedIssuer = $ExpectedFederatedCredentialIssuer; expectedSubject = $ExpectedFederatedCredentialSubject
+    audience = 'api://AzureADTokenExchange'
+    preservedFederatedCredentials = @($federatedCredentials)
+    existingApplicationCredentials = @($existingCredentials)
+    existingTrustNotice = 'All existing federated trusts and application/service-principal credentials are preserved and can exercise the new application grants. Approval applies to this whole runtime identity, not only the selected pipeline trust. Credential metadata is displayed; secret and certificate material is excluded.'
+  }
 }
 
 $graphServicePrincipal = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'" -TenantId $TenantId
@@ -166,7 +342,7 @@ $plan = New-MaesterConsentPlan -TenantId $TenantId -PrincipalObjectId $Principal
   -ManifestSha256 (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() `
   -Desired @($requestedRoles | ForEach-Object { "$($resourceServicePrincipal.id)/$($_.id)/$($_.value)" }) `
   -Missing @($missingRoles | ForEach-Object { "$($resourceServicePrincipal.id)/$($_.id)/$($_.value)" }) `
-  -Details @{ maesterVersion = $manifest.maesterVersion; profile = $PermissionProfile; includeMailSend = $IncludeMailSend; includeReportSettingsWrite = $IncludeReportSettingsWrite; consequences = $consequences; preservedExistingGraphRoles = @($existingGraphRoles); preservedExistingOptionalCapabilities = @($existingOptionalCapabilities); existingAccessNotice = 'Existing grants are preserved. A disabled desired capability does not revoke existing access; existing report-setting write authority can still permit tenant privacy changes during assessment. Existing Mail.Send authority alone does not configure or trigger report delivery.' }
+  -Details @{ targetProvenance = $targetProvenance; maesterVersion = $manifest.maesterVersion; profile = $PermissionProfile; includeMailSend = $IncludeMailSend; includeReportSettingsWrite = $IncludeReportSettingsWrite; consequences = $consequences; preservedExistingGraphRoles = @($existingGraphRoles); preservedExistingOptionalCapabilities = @($existingOptionalCapabilities); existingAccessNotice = 'Existing grants are preserved. A disabled desired capability does not revoke existing access; existing report-setting write authority can still permit tenant privacy changes during assessment. Existing Mail.Send authority alone does not configure or trigger report delivery.' }
 if (-not $Apply) { return $plan }
 Assert-MaesterConsentPlanApproval -Plan $plan -ApprovedPlanHash $ApprovedPlanHash
 

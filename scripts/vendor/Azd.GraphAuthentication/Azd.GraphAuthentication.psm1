@@ -33,7 +33,8 @@ function Get-AzdGraphContextAssessment {
         [Parameter(Mandatory)][guid] $ExpectedClientId,
         [Parameter(Mandatory)][string] $Environment,
         [Parameter(Mandatory)][string] $ExpectedAccount,
-        [Parameter(Mandatory)][string[]] $Scopes
+        [Parameter(Mandatory)][string[]] $Scopes,
+        [ValidateSet('CurrentUser', 'Process')][string] $ContextScope = 'CurrentUser'
     )
 
     $reasons = [System.Collections.Generic.List[string]]::new()
@@ -63,8 +64,8 @@ function Get-AzdGraphContextAssessment {
         if ([string] $Context.AuthType -ine 'Delegated') {
             $reasons.Add('the context is not delegated')
         }
-        if ([string] $Context.ContextScope -ine 'CurrentUser') {
-            $reasons.Add('the context is not persisted for the current user')
+        if ([string] $Context.ContextScope -ine $ContextScope) {
+            $reasons.Add("the context scope does not match the required $ContextScope scope")
         }
         if ([string]::IsNullOrWhiteSpace([string] $Context.Account)) {
             $reasons.Add('the context has no selected account')
@@ -184,7 +185,10 @@ function Connect-AzdGraphSession {
         [switch] $AllowContextReplacement,
 
         [ValidateRange(60, 900)]
-        [int] $ClientTimeoutSeconds = 300
+        [int] $ClientTimeoutSeconds = 300,
+
+        [ValidateSet('CurrentUser', 'Process')]
+        [string] $ContextScope = 'CurrentUser'
     )
 
     if ($TenantId -eq [guid]::Empty) { throw 'TenantId must identify a nonempty tenant.' }
@@ -209,11 +213,20 @@ function Connect-AzdGraphSession {
     }
     $environmentName = [string] $environments[0].Name
     $context = Get-MgContext
+    # SDK connection failure can clean up the previously selected context.
+    # Do not risk persisted user sessions when opting into Process scope.
+    if ($ContextScope -ieq 'Process' -and $null -ne $context) {
+        $scopeProperty = $context.PSObject.Properties['ContextScope']
+        if ($null -eq $scopeProperty -or [string] $scopeProperty.Value -ine 'Process') {
+            throw 'Process-scoped Graph authentication cannot replace an inherited non-Process context, even with replacement authorization. Start a fresh pwsh -NoProfile process and rerun setup without disconnecting existing sessions.'
+        }
+    }
     $assessment = Get-AzdGraphContextAssessment `
         -Context $context `
         -TenantId $TenantId `
         -ExpectedClientId $ExpectedClientId `
         -Environment $environmentName `
+        -ContextScope $ContextScope `
         -ExpectedAccount $expectedAccountName `
         -Scopes $requiredScopes
 
@@ -249,7 +262,7 @@ function Connect-AzdGraphSession {
         ClientId = $ExpectedClientId.Guid
         Environment = $environmentName
         Scopes = $requiredScopes
-        ContextScope = 'CurrentUser'
+        ContextScope = $ContextScope
         ClientTimeout = $ClientTimeoutSeconds
         NoWelcome = $true
         ErrorAction = 'Stop'
@@ -258,7 +271,7 @@ function Connect-AzdGraphSession {
         Connect-MgGraph @connectParameters | Out-Null
     }
     catch {
-        throw "Interactive Microsoft Graph authentication through the normal broker or browser flow failed. No alternate authentication flow was started. Error type: $($_.Exception.GetType().FullName)."
+        throw "Interactive Microsoft Graph authentication through the normal broker or browser flow failed. The coordinator did not request an alternate authentication flow; SDK-internal fallback may still occur. Error type: $($_.Exception.GetType().FullName)."
     }
 
     $context = Get-MgContext
@@ -267,6 +280,7 @@ function Connect-AzdGraphSession {
         -TenantId $TenantId `
         -ExpectedClientId $ExpectedClientId `
         -Environment $environmentName `
+        -ContextScope $ContextScope `
         -ExpectedAccount $expectedAccountName `
         -Scopes $requiredScopes
     if (-not $assessment.IsUsable) {
