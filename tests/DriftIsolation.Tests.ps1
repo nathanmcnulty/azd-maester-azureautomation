@@ -2,7 +2,7 @@
 BeforeAll {
     $script:runner = Get-Content (Join-Path $PSScriptRoot '../scripts/Invoke-MaesterAutomationRunbook.ps1') -Raw
     $start = $script:runner.IndexOf('Write-Output "Running Invoke-Maester')
-    $end = $script:runner.IndexOf("Write-Output 'Invoke-Maester execution completed.'", $start)
+    $end = $script:runner.IndexOf("if (`$invocationErrors.Count -gt 0)", $start)
     if ($start -lt 0 -or $end -lt $start) { throw 'Production invocation block was not found.' }
     $script:invokeBlock = [scriptblock]::Create($script:runner.Substring($start, $end - $start))
     $script:originalDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
@@ -17,6 +17,8 @@ BeforeAll {
         [Environment]::SetEnvironmentVariable($Name, $valueToRestore, 'Process')
     }
     function Invoke-Maester {
+        [CmdletBinding()]
+        param($Path,$OutputFolder,$OutputFolderFileName,$NonInteractive,$PassThru,$DisableTelemetry,$SkipVersionCheck,$PesterConfiguration)
         $script:observedDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
         if ($script:throwDuringRun) { throw 'controlled Maester failure' }
     }
@@ -27,19 +29,19 @@ Describe 'Default-disabled drift isolation' {
         Restore-ProcessEnvironmentVariable -Name 'DRIFT_TEST_MARKER' -Value $script:originalMarker
     }
     It 'isolates and restores an inherited root when failure is <fails>' -ForEach @(@{fails=$false}, @{fails=$true}) {
-        $maesterInvokeParameters = @{}; $testsPath = 'fixture-tests'
+        $maesterInvokeParameters = @{}; $testsPath = 'fixture-tests'; $tempRoot = $TestDrive
         $script:throwDuringRun = $fails
         [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'unapproved-inherited-folder', 'Process')
-        if ($fails) { { & $script:invokeBlock } | Should -Throw '*controlled Maester failure*' }
+        if ($fails) { { & $script:invokeBlock } | Should -Throw '*assessment.invokeFailed*' }
         else { & $script:invokeBlock | Out-Null }
         $script:observedDriftRoot | Should -BeNullOrEmpty
         [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process') | Should -BeExactly 'unapproved-inherited-folder'
     }
     It 'preserves an unset root after the run when failure is <fails>' -ForEach @(@{fails=$false}, @{fails=$true}) {
-        $maesterInvokeParameters = @{}; $testsPath = 'fixture-tests'; $script:throwDuringRun = $false
+        $maesterInvokeParameters = @{}; $testsPath = 'fixture-tests'; $tempRoot = $TestDrive; $script:throwDuringRun = $false
         [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', [System.Management.Automation.Language.NullString]::Value, 'Process')
         $script:throwDuringRun = $fails
-        if ($fails) { { & $script:invokeBlock } | Should -Throw '*controlled Maester failure*' }
+        if ($fails) { { & $script:invokeBlock } | Should -Throw '*assessment.invokeFailed*' }
         else { & $script:invokeBlock | Out-Null }
         $script:observedDriftRoot | Should -BeNullOrEmpty
         [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process') | Should -Be $null
@@ -65,6 +67,7 @@ Describe 'Drift' { It 'must not run' { $false | Should -BeTrue } }
 param([string]$TestsPath)
 $ErrorActionPreference = 'Stop'
 Import-Module Pester -RequiredVersion 6.2.0 -Force
+$junitPath = Join-Path $TestsPath 'pester-junit.xml'
 '@ + "`n" + $configuration + @'
 
 $pesterConfig.Run.Path = $TestsPath

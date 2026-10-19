@@ -22,6 +22,12 @@ param(
   # Retained for existing diagnostic callers; the runbook host policy no longer needs it.
   [switch]$AllowRuntimeValidationPreview,
 
+  # Qualification is explicit. The runbook rejects configured mail before invocation.
+  [switch]$RequireNoMail,
+  [switch]$ExpectWebApp,
+  [switch]$ExpectExchangeImport,
+  [switch]$ExpectTeamsImport,
+
   [switch]$PassThru
 )
 
@@ -32,7 +38,12 @@ if ($AllowRuntimeValidationPreview -and -not $RuntimeValidationOnly) {
   throw 'AllowRuntimeValidationPreview requires RuntimeValidationOnly.'
 }
 
+if ($RuntimeValidationOnly -and ($RequireNoMail -or $ExpectWebApp -or $ExpectExchangeImport -or $ExpectTeamsImport)) {
+  throw 'RuntimeValidationOnly cannot include assessment, publication, or optional-import expectations.'
+}
+
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-SetupHelpers.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Maester.AutomationEvidence.psm1') -Force
 
 if (-not $TenantId -and $env:AZURE_TENANT_ID) { $TenantId = $env:AZURE_TENANT_ID }
 if ([string]::IsNullOrWhiteSpace($TenantId)) {
@@ -49,7 +60,12 @@ $apiVersion = '2023-11-01'
 $jobId = [guid]::NewGuid().ToString()
 $basePath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName"
 
+$expectedContent = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-MaesterAutomationRunbook.ps1') -Raw
 $jobParameters = @{}
+if (-not $RuntimeValidationOnly) {
+  $jobParameters.ValidationJobId = ($jobId | ConvertTo-Json -Compress)
+  if ($RequireNoMail) { $jobParameters.RequireNoMail = ($true | ConvertTo-Json -Compress) }
+}
 if ($RuntimeValidationOnly) {
   # ARM job parameter values are strings containing JSON-serialized values.
   # The service deserializes this to the runbook's Boolean, not string truthiness.
@@ -69,6 +85,7 @@ $jobBody = @{
   }
 } | ConvertTo-Json -Depth 10 -Compress
 
+$startedAt = [datetimeoffset]::UtcNow
 Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$basePath/jobs/${jobId}?api-version=$apiVersion" -Headers $armHeaders -Body $jobBody -ContentType 'application/json' | Out-Null
 Write-Host "Started runbook job: $jobId"
 
@@ -81,58 +98,25 @@ do {
   Write-Host "Job status: $status"
 } while ($status -in @('New', 'Activating', 'Running', 'Queued') -and (Get-Date) -lt $deadline)
 
-$streams = @()
-$streamsUrl = "https://management.azure.com$basePath/jobs/${jobId}/streams?api-version=$apiVersion"
-do {
-  $streamsPayload = Invoke-RestMethod -Method GET -Uri $streamsUrl -Headers $armHeaders
-  $hasValueProperty = $false
-  $hasNextLinkProperty = $false
-  if ($streamsPayload -and $streamsPayload.PSObject) {
-    $hasValueProperty = $streamsPayload.PSObject.Properties.Match('value').Count -gt 0
-    $hasNextLinkProperty = $streamsPayload.PSObject.Properties.Match('nextLink').Count -gt 0
-  }
-
-  if ($streamsPayload -is [System.Array]) {
-    $streams += $streamsPayload
-    $nextLink = $null
-  }
-  elseif ($hasValueProperty -and $streamsPayload.value) {
-    $streams += $streamsPayload.value
-    $nextLink = if ($hasNextLinkProperty) { $streamsPayload.nextLink } else { $null }
-  }
-  else {
-    $nextLink = $null
-  }
-  if ($nextLink) {
-    $streamsUrl = if ($nextLink -like 'https://*') {
-      $nextLink
-    }
-    else {
-      "https://management.azure.com$nextLink"
-    }
-  }
-} while ($nextLink)
-
-foreach ($stream in $streams) {
-  $streamType = $stream.properties.streamType
-  $streamId = if ($stream.properties.jobStreamId) { $stream.properties.jobStreamId } else { ($stream.id -split '/')[-1] }
-  $detail = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$basePath/jobs/${jobId}/streams/${streamId}?api-version=$apiVersion" -Headers $armHeaders
-  Write-Host "[$streamType] $($detail.properties.summary)"
-}
-
 if ($status -ne 'Completed') {
-  $job = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$basePath/jobs/${jobId}?api-version=$apiVersion" -Headers $armHeaders
-  $exception = $job.properties.exception
-  if ($exception) {
-    throw "Runbook job did not complete successfully. Final status: $status. Exception: $exception"
-  }
+  # Do not replay service exceptions or private assessment stream diagnostics.
   throw "Runbook job did not complete successfully. Final status: $status"
 }
 
-Write-Host 'Runbook validation completed successfully.'
+# These documented read endpoints are bound to the created job, not whichever
+# runbook version is published now. No added role or data-plane grant is needed.
+try {
+  $output = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$basePath/jobs/${jobId}/output?api-version=$apiVersion" -Headers $armHeaders
+  $jobContent = Invoke-RestMethod -Method GET -Uri "https://management.azure.com$basePath/jobs/${jobId}/runbookContent?api-version=$apiVersion" -Headers $armHeaders
+}
+catch { throw 'validation.jobEvidenceUnavailable: existing Automation job output/content read access is required; no permissions were changed.' }
+$evidence = Read-AutomationJobEvidence -Output $output -JobContent $jobContent -ExpectedContent $expectedContent -JobId $jobId -NotBefore $startedAt -RuntimeValidationOnly:$RuntimeValidationOnly -RequireNoMail:$RequireNoMail -ExpectWebApp:$ExpectWebApp -ExpectExchangeImport:$ExpectExchangeImport -ExpectTeamsImport:$ExpectTeamsImport
+Write-Host "Runbook evidence verified. Scope: $($evidence.Scope)."
 
 $result = [pscustomobject]@{
   ValidationPassed      = $true
+  ValidationScope       = $evidence.Scope
+  Evidence              = $evidence
   JobId                 = $jobId
   FinalStatus           = $status
   SubscriptionId        = $SubscriptionId
