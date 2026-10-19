@@ -83,3 +83,22 @@ binding, seven real package imports and receipt inspection remain Codex-owned
 sub-mvp gates. Managed identity, optional workloads, assessment, report access,
 retention/rollback and owned cleanup remain separate gates. This mode neither
 publishes changed runbook content nor bypasses the existing preservation contract.
+
+### Temporary service-preview import validation
+
+An existing lab Automation job configured for PowerShell 7.6 reported
+`7.6.0-preview.5`, Core, and .NET `10.0.9`. This is an observation of that host,
+not proof of the default in newly deployed accounts. Azure Automation documents
+[PowerShell 7.6 GA in July 2026](https://learn.microsoft.com/azure/automation/whats-new#july-2026).
+
+For a bounded import-only diagnostic on that exact host, pass both
+`-RuntimeValidationOnly -AllowRuntimeValidationPreview` to the validation helper.
+Both options default off. The helper submits
+`{"RuntimeValidationOnly":"true","AllowRuntimeValidationPreview":"true"}`.
+The additional exception matches only `7.6.0-preview.5`; Core and .NET 10+
+remain required. Using the preview option without runtime-only mode fails before
+any job creation or runbook work. Ordinary assessment retains its existing version gate and does not receive
+this exception. Receipts retain the observed version, so preview-host import evidence must
+not be described as stable-host qualification. Reevaluate this temporary option
+once a fresh-account host observation and the service/runtime discrepancy are
+resolved; do not generalize it to other prereleases.

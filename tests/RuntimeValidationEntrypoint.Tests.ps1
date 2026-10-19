@@ -36,7 +36,7 @@ Describe 'Runtime validation through the maintained runbook entrypoint' {
     Set-Content -LiteralPath $harnessPath -Value @'
 param([string]$RunbookPath, [string]$Fixtures, [string]$ResultPath,
       [string]$Mode = 'true', [string]$Failure = '', [string]$FailureModule = 'Maester',
-      [string]$RuntimeVersion = '', [string]$RuntimeEdition = '', [string]$RuntimeDotNet = '')
+      [string]$RuntimeVersion = '', [string]$RuntimeEdition = '', [string]$RuntimeDotNet = '', [string]$PreviewMode = 'default')
 $ErrorActionPreference = 'Stop'
 Microsoft.PowerShell.Core\Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
 $PSModuleAutoLoadingPreference = 'None'
@@ -134,12 +134,13 @@ try {
     Add-Type -TypeDefinition ('public class RuntimeProbeEnvironment { public static System.Version Version = new System.Version("' + $RuntimeDotNet + '"); }')
     [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')::Add('Environment', [RuntimeProbeEnvironment])
   }
-  if ($RuntimeVersion) { $PSVersionTable.PSVersion = [version]$RuntimeVersion }
+  if ($RuntimeVersion) { $PSVersionTable.PSVersion = [System.Management.Automation.SemanticVersion]$RuntimeVersion }
   if ($RuntimeEdition) { $PSVersionTable.PSEdition = $RuntimeEdition }
   $parameters = @{}
   if ($Mode -eq 'true') { $parameters.RuntimeValidationOnly = $true }
   elseif ($Mode -eq 'false') { $parameters.RuntimeValidationOnly = $false }
   elseif ($Mode -in @('string-true', 'string-false')) { $parameters.RuntimeValidationOnly = $Mode.Substring(7) }
+  if ($PreviewMode -ne 'default') { $parameters.AllowRuntimeValidationPreview = ($PreviewMode -eq 'true') }
   & $RunbookPath @parameters | ForEach-Object { $global:runtimeProbe_outputs.Add($_) }
 }
 catch { $global:runtimeProbe_errorText = $_.Exception.Message; $global:runtimeProbe_errorDetails = ($_ | Out-String) + $_.ScriptStackTrace }
@@ -158,7 +159,7 @@ if ($global:runtimeProbe_errorText) { exit 1 }
 
     function Invoke-OfflineRunbook {
       param([string]$Mode = 'true', [string]$Failure = '', [string]$FailureModule = 'Maester',
-            [string]$RuntimeVersion = '', [string]$RuntimeEdition = '', [string]$RuntimeDotNet = '')
+            [string]$RuntimeVersion = '', [string]$RuntimeEdition = '', [string]$RuntimeDotNet = '', [string]$PreviewMode = 'default')
       $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
       $tempPath = Join-Path $caseRoot 'temp'
       New-Item -ItemType Directory -Path $tempPath -Force | Out-Null
@@ -174,7 +175,7 @@ if ($global:runtimeProbe_errorText) { exit 1 }
       foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $harnessPath,
           '-RunbookPath', $runbookPath, '-Fixtures', $fixtures, '-ResultPath', $resultPath,
           '-Mode', $Mode, '-Failure', $Failure, '-FailureModule', $FailureModule,
-          '-RuntimeVersion', $RuntimeVersion, '-RuntimeEdition', $RuntimeEdition, '-RuntimeDotNet', $RuntimeDotNet)) {
+          '-RuntimeVersion', $RuntimeVersion, '-RuntimeEdition', $RuntimeEdition, '-RuntimeDotNet', $RuntimeDotNet, '-PreviewMode', $PreviewMode)) {
         $start.ArgumentList.Add($argument)
       }
       $process = [Diagnostics.Process]::Start($start)
@@ -300,4 +301,35 @@ if ($global:runtimeProbe_errorText) { exit 1 }
     @($result.Trace).Count | Should -Be 0
     Assert-NoValidationReceipt $result
   }
+  It 'allows only explicitly opted-in exact service preview imports without downstream work' {
+    $result = Invoke-OfflineRunbook -RuntimeVersion '7.6.0-preview.5' -RuntimeEdition 'Core' -RuntimeDotNet '10.0.9' -PreviewMode 'true'
+    $result.ExitCode | Should -Be 0 -Because $result.Error
+    (@($result.Trace | Where-Object Kind -eq 'Import').Name -join ',') | Should -Be ($requiredModules -join ',')
+    @($result.Trace | Where-Object Kind -eq 'Forbidden').Count | Should -Be 0
+    $receipts = @($result.Output | Where-Object { $_ -match '^\{' } | ForEach-Object { $_ | ConvertFrom-Json })
+    $receipts.Count | Should -Be 1
+    $receipts[0].PowerShellVersion | Should -BeExactly '7.6.0-preview.5'
+    $receipts[0].DotNetVersion | Should -BeExactly '10.0.9'
+  }
+
+  It 'rejects preview exception misuse before all work: <Version> <Mode> <PreviewMode> <Edition> <DotNet>' -ForEach @(
+    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='default'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='false'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.5'; Mode='default'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.5'; Mode='false'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.5'; Mode='default'; PreviewMode='default'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.4'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.6'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-rc.1'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.5.4'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='true'; Edition='Desktop'; DotNet='10.0.9' },
+    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='9.0.10' }
+  ) {
+    $result = Invoke-OfflineRunbook -Mode $Mode -RuntimeVersion $Version -RuntimeEdition $Edition -RuntimeDotNet $DotNet -PreviewMode $PreviewMode
+    $result.ExitCode | Should -Be 1
+    $result.Error | Should -Match 'requires (RuntimeValidationOnly|PowerShell 7\.6)'
+    @($result.Trace).Count | Should -Be 0
+    @($result.Output).Count | Should -Be 0
+  }
+
 }

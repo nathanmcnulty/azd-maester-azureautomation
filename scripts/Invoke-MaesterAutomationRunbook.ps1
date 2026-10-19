@@ -20,14 +20,24 @@ param(
 
   # Boolean is supported by Automation job parameters; opt in explicitly.
   [Parameter(Mandatory = $false)]
-  [bool]$RuntimeValidationOnly = $false
+  [bool]$RuntimeValidationOnly = $false,
+
+  # Temporary, exact service-host exception for import validation only.
+  [Parameter(Mandatory = $false)]
+  [bool]$AllowRuntimeValidationPreview = $false
 )
 
 $ErrorActionPreference = 'Stop'
 $ConfirmPreference = 'None'
 
+if ($AllowRuntimeValidationPreview -and -not $RuntimeValidationOnly) {
+  throw 'AllowRuntimeValidationPreview requires RuntimeValidationOnly.'
+}
+$allowObservedPreview = $RuntimeValidationOnly -and $AllowRuntimeValidationPreview -and
+  $PSVersionTable.PSVersion.ToString() -ceq '7.6.0-preview.5'
+
 # Also enforce at runtime: Automation hosts may not honor #Requires.
-if ($PSVersionTable.PSVersion -lt [version]'7.6' -or $PSVersionTable.PSEdition -ne 'Core' -or
+if (($PSVersionTable.PSVersion -lt [version]'7.6' -and -not $allowObservedPreview) -or $PSVersionTable.PSEdition -ne 'Core' -or
     [Environment]::Version.Major -lt 10) {
   throw ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+. Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, [Environment]::Version, [Environment]::Version.Major)
 }

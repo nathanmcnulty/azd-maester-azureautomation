@@ -19,11 +19,17 @@ param(
 
   [switch]$RuntimeValidationOnly,
 
+  [switch]$AllowRuntimeValidationPreview,
+
   [switch]$PassThru
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($AllowRuntimeValidationPreview -and -not $RuntimeValidationOnly) {
+  throw 'AllowRuntimeValidationPreview requires RuntimeValidationOnly.'
+}
 
 Import-Module (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Maester-SetupHelpers.psm1') -Force
 
@@ -47,6 +53,10 @@ if ($RuntimeValidationOnly) {
   # ARM job parameter values are strings containing JSON-serialized values.
   # The service deserializes this to the runbook's Boolean, not string truthiness.
   $jobParameters.RuntimeValidationOnly = ($true | ConvertTo-Json -Compress)
+}
+
+if ($AllowRuntimeValidationPreview) {
+  $jobParameters.AllowRuntimeValidationPreview = ($true | ConvertTo-Json -Compress)
 }
 
 $jobBody = @{
