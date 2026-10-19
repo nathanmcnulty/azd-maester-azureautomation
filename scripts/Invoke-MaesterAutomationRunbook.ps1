@@ -22,7 +22,7 @@ param(
   [Parameter(Mandatory = $false)]
   [bool]$RuntimeValidationOnly = $false,
 
-  # Temporary, exact service-host exception for import validation only.
+  # Retained for existing diagnostic callers; host qualification is shared by both modes.
   [Parameter(Mandatory = $false)]
   [bool]$AllowRuntimeValidationPreview = $false
 )
@@ -33,13 +33,17 @@ $ConfirmPreference = 'None'
 if ($AllowRuntimeValidationPreview -and -not $RuntimeValidationOnly) {
   throw 'AllowRuntimeValidationPreview requires RuntimeValidationOnly.'
 }
-$allowObservedPreview = $RuntimeValidationOnly -and $AllowRuntimeValidationPreview -and
-  $PSVersionTable.PSVersion.ToString() -ceq '7.6.0-preview.5'
+# Azure's freshly provisioned 7.6 runtime reports this exact host version.
+# Qualify it for both modes without accepting any other prerelease (issue #45).
+$isStableRuntime = [string]::IsNullOrEmpty($PSVersionTable.PSVersion.PreReleaseLabel) -and
+  $PSVersionTable.PSVersion -ge [version]'7.6'
+$isObservedServiceRuntime = $PSVersionTable.PSVersion.ToString() -ceq '7.6.0-preview.5' -and
+  [Environment]::Version.Major -eq 10
 
 # Also enforce at runtime: Automation hosts may not honor #Requires.
-if (($PSVersionTable.PSVersion -lt [version]'7.6' -and -not $allowObservedPreview) -or $PSVersionTable.PSEdition -ne 'Core' -or
+if ((-not $isStableRuntime -and -not $isObservedServiceRuntime) -or $PSVersionTable.PSEdition -ne 'Core' -or
     [Environment]::Version.Major -lt 10) {
-  throw ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+. Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, [Environment]::Version, [Environment]::Version.Major)
+  throw ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+ (stable releases, or exactly 7.6.0-preview.5 on .NET 10). Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, [Environment]::Version, [Environment]::Version.Major)
 }
 
 # Azure Automation currently accepts a package contentLink with an incorrect
