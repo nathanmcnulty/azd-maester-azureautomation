@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 # Deliberately separate framework health from policy compliance. These are two
-# unconditional core tests in the locked Maester 2.2.0 suite, not a coverage claim.
+# unconditional core tests in the locked Maester 2.3.0 suite, not a coverage claim.
 $script:CoreCases = [ordered]@{
   'MT.1068' = 'Maester/Entra/Test-MtTenantCreationRestricted.Tests.ps1'
   'MT.1069' = 'Maester/Entra/Test-MtSecurityGroupCreationRestricted.Tests.ps1'

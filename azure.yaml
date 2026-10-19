@@ -20,7 +20,7 @@ hooks:
     continueOnError: false
   postprovision:
     shell: pwsh
-    run: ./scripts/Run-AzdPostProvision.ps1
+    run: ./scripts/Run-AzdPostProvision.ps1 -InteractiveConsent
     interactive: true
     continueOnError: false
   predown:

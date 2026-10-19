@@ -1,7 +1,7 @@
 function New-TestAssessmentResult {
   param([string]$TestsPath)
   [pscustomobject]@{
-    EndOfJson = 'EndOfJson'; CurrentVersion = [version]'2.2.0'; TotalCount = 5
+    EndOfJson = 'EndOfJson'; CurrentVersion = [version]'2.3.0'; TotalCount = 5
     PassedCount = 1; FailedCount = 1; ErrorCount = 0; InvestigateCount = 0; SkippedCount = 1; NotRunCount = 2
     Tests = @(
       [pscustomobject]@{ Id = 'MT.1068'; Result = 'Passed'; ErrorRecord = @(); ScriptBlockFile = (Join-Path $TestsPath 'Maester/Entra/Test-MtTenantCreationRestricted.Tests.ps1') }
@@ -17,7 +17,7 @@ function New-TestAutomationReceipt {
   [ordered]@{
     SchemaVersion = 1; Kind = 'MaesterAutomationAssessment'; RequestedJobId = $JobId
     StartedAt = [datetimeoffset]::UtcNow.ToString('o'); CompletedAt = [datetimeoffset]::UtcNow.ToString('o')
-    Runtime = @{ PowerShell = '7.6.0-preview.5'; DotNet = '10.0.9'; Edition = 'Core'; Modules = @{ 'NuGet' = '1.3.3'; 'PackageManagement' = '1.4.8.1'; 'PowerShellGet' = '2.2.5'; 'Az.Accounts' = '5.5.3'; 'Microsoft.Graph.Authentication' = '2.41.0'; Pester = '6.2.0'; Maester = '2.2.0' } }
+    Runtime = @{ PowerShell = '7.6.0-preview.5'; DotNet = '10.0.9'; Edition = 'Core'; Modules = @{ 'NuGet' = '1.3.3'; 'PackageManagement' = '1.4.8.1'; 'PowerShellGet' = '2.2.5'; 'Az.Accounts' = '5.5.3'; 'Microsoft.Graph.Authentication' = '2.41.0'; Pester = '6.2.0'; Maester = '2.3.0' } }
     Assessment = @{ Outcome = 'Completed'; Counts = @{ TotalCount = 5; PassedCount = 1; FailedCount = 1; ErrorCount = 0; InvestigateCount = 0; SkippedCount = 1; NotRunCount = 2 }; CoreCases = @{ 'MT.1068' = 'Passed'; 'MT.1069' = 'Failed' }; JunitErrors = 0; JunitTests = 5; ReportSha256 = 'a' * 64; JunitSha256 = 'b' * 64 }
     Publication = @{ Archive = 'Published'; Latest = 'Published'; WebApp = 'Disabled'; Mail = 'Disabled' }
   }

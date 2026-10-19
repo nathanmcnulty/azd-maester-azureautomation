@@ -16,6 +16,14 @@ Describe 'Maester assessment integrity independently of compliance' {
     $result = New-TestAssessmentResult $testsPath
     $result | Add-Member OutputFiles ([pscustomobject]@{ OutputHtmlFile = $report })
   }
+  It 'accepts only the reviewed Maester 2.3.0 result contract' {
+    $result.CurrentVersion = [version]'2.3.0'
+    (Get-MaesterAssessmentEvidence -Output $result -JunitPath $junit -TestsPath $testsPath -ReportPath $report).Outcome | Should -Be 'Completed'
+  }
+  It 'rejects stale and unreviewed Maester versions <_>' -ForEach @('2.2.0','2.3.1','3.0.0','2.3.0-preview') {
+    $result.CurrentVersion = $_
+    { Get-MaesterAssessmentEvidence -Output $result -JunitPath $junit -TestsPath $testsPath -ReportPath $report } | Should -Throw '*resultInvalid*'
+  }
   It 'accepts genuine policy failures with expected skipped and excluded tests' {
     $e = Get-MaesterAssessmentEvidence -Output @('incidental output', $result) -JunitPath $junit -TestsPath $testsPath -ReportPath $report
     $e.Outcome | Should -Be 'Completed'
@@ -128,10 +136,11 @@ Describe 'Maester assessment integrity independently of compliance' {
 }
 
 Describe 'Approved pure contract parity' {
-  It 'retains the exact reviewed Container PR 51 health functions' {
+  It 'retains reviewed Container PR 51 gates except the tested 2.3.0 version pin' {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
     $errors | Should -BeNullOrEmpty
+    # Original reviewed function hashes, after normalizing only the independently tested module-version pin.
     # Canonical LF function text SHA256 from Container head dacae290354121588e1ed6459b71b6d89d2193d5.
     $expected = @{
       'Get-EvidenceCount' = 'd09b86e0f6390598ef0b37840d6143ecc74a460f0365e3b6abfa9786efff0727'
@@ -139,7 +148,7 @@ Describe 'Approved pure contract parity' {
     }
     foreach ($name in $expected.Keys) {
       $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
-      $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($function.Extent.Text.Replace("`r`n", "`n")))).ToLowerInvariant()
+      $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($function.Extent.Text.Replace("`r`n", "`n").Replace("'2.3.0'", "'2.2.0'")))).ToLowerInvariant()
       $hash | Should -BeExactly $expected[$name]
     }
   }
