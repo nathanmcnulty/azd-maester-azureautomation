@@ -36,7 +36,7 @@ Describe 'Runtime validation through the maintained runbook entrypoint' {
     Set-Content -LiteralPath $harnessPath -Value @'
 param([string]$RunbookPath, [string]$Fixtures, [string]$ResultPath,
       [string]$Mode = 'true', [string]$Failure = '', [string]$FailureModule = 'Maester',
-      [string]$RuntimeVersion = '', [string]$RuntimeEdition = '')
+      [string]$RuntimeVersion = '', [string]$RuntimeEdition = '', [string]$RuntimeDotNet = '')
 $ErrorActionPreference = 'Stop'
 Microsoft.PowerShell.Core\Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
 $PSModuleAutoLoadingPreference = 'None'
@@ -46,7 +46,7 @@ $global:runtimeProbe_locks = Get-Content -LiteralPath (Join-Path $Fixtures 'lock
 $global:runtimeProbe_allowed = @('NuGet', 'PackageManagement', 'PowerShellGet', 'Az.Accounts', 'Microsoft.Graph.Authentication', 'Pester', 'Maester')
 $global:runtimeProbe_errorText = $null
 $global:runtimeProbe_realVersion = $PSVersionTable.PSVersion.ToString()
-$global:runtimeProbe_realDotNet = [Environment]::Version.ToString()
+$global:runtimeProbe_realDotNet = [System.Environment]::Version.ToString()
 function Add-Trace([string]$Kind, [string]$Name, [string]$Path = '') {
   $global:runtimeProbe_trace.Add([pscustomobject]@{ Kind = $Kind; Name = $Name; Path = $Path })
 }
@@ -129,6 +129,11 @@ function Install-MaesterTests { Invoke-Forbidden 'Install-MaesterTests' }
 function Send-MgUserMail { Invoke-Forbidden 'Send-MgUserMail' }
 function Start-Sleep { Invoke-Forbidden 'Start-Sleep' }
 try {
+  # Shadow only the CLR type boundary in this isolated child; invoke the unchanged runbook.
+  if ($RuntimeDotNet) {
+    Add-Type -TypeDefinition ('public class RuntimeProbeEnvironment { public static System.Version Version = new System.Version("' + $RuntimeDotNet + '"); }')
+    [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')::Add('Environment', [RuntimeProbeEnvironment])
+  }
   if ($RuntimeVersion) { $PSVersionTable.PSVersion = [version]$RuntimeVersion }
   if ($RuntimeEdition) { $PSVersionTable.PSEdition = $RuntimeEdition }
   $parameters = @{}
@@ -153,7 +158,7 @@ if ($global:runtimeProbe_errorText) { exit 1 }
 
     function Invoke-OfflineRunbook {
       param([string]$Mode = 'true', [string]$Failure = '', [string]$FailureModule = 'Maester',
-            [string]$RuntimeVersion = '', [string]$RuntimeEdition = '')
+            [string]$RuntimeVersion = '', [string]$RuntimeEdition = '', [string]$RuntimeDotNet = '')
       $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
       $tempPath = Join-Path $caseRoot 'temp'
       New-Item -ItemType Directory -Path $tempPath -Force | Out-Null
@@ -169,7 +174,7 @@ if ($global:runtimeProbe_errorText) { exit 1 }
       foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $harnessPath,
           '-RunbookPath', $runbookPath, '-Fixtures', $fixtures, '-ResultPath', $resultPath,
           '-Mode', $Mode, '-Failure', $Failure, '-FailureModule', $FailureModule,
-          '-RuntimeVersion', $RuntimeVersion, '-RuntimeEdition', $RuntimeEdition)) {
+          '-RuntimeVersion', $RuntimeVersion, '-RuntimeEdition', $RuntimeEdition, '-RuntimeDotNet', $RuntimeDotNet)) {
         $start.ArgumentList.Add($argument)
       }
       $process = [Diagnostics.Process]::Start($start)
@@ -284,12 +289,14 @@ if ($global:runtimeProbe_errorText) { exit 1 }
   }
 
   It 'rejects unsupported host metadata before downloads, imports, or filesystem work: <RuntimeVersion> <RuntimeEdition>' -ForEach @(
-    @{ RuntimeVersion = '7.5.4'; RuntimeEdition = 'Core' },
-    @{ RuntimeVersion = '7.6.0'; RuntimeEdition = 'Desktop' }
+    @{ RuntimeVersion = '7.5.4'; RuntimeEdition = 'Core'; RuntimeDotNet = '10.0.12' },
+    @{ RuntimeVersion = '7.6.0'; RuntimeEdition = 'Desktop'; RuntimeDotNet = '10.0.12' },
+    @{ RuntimeVersion = '7.6.0'; RuntimeEdition = 'Core'; RuntimeDotNet = '9.0.10' }
   ) {
-    $result = Invoke-OfflineRunbook -RuntimeVersion $RuntimeVersion -RuntimeEdition $RuntimeEdition
+    $result = Invoke-OfflineRunbook -RuntimeVersion $RuntimeVersion -RuntimeEdition $RuntimeEdition -RuntimeDotNet $RuntimeDotNet
     $result.ExitCode | Should -Be 1
-    $result.Error | Should -Match 'requires PowerShell 7\.6\+ Core on \.NET 10\+'
+    $result.Error | Should -Be ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+. Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $RuntimeVersion, $RuntimeEdition, $RuntimeDotNet, ([version]$RuntimeDotNet).Major)
+    @($result.Output).Count | Should -Be 0
     @($result.Trace).Count | Should -Be 0
     Assert-NoValidationReceipt $result
   }
