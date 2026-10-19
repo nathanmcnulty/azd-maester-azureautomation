@@ -19,6 +19,7 @@ param(
 
   [switch]$RuntimeValidationOnly,
 
+  # Retained for existing diagnostic callers; the runbook host policy no longer needs it.
   [switch]$AllowRuntimeValidationPreview,
 
   [switch]$PassThru

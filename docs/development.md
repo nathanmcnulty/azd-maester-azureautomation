@@ -65,7 +65,7 @@ Omitting the switch, or supplying `-RuntimeValidationOnly:$false`, submits `{}`
 and preserves ordinary assessment behavior. For direct local invocation of the
 runbook, pass the actual Boolean `-RuntimeValidationOnly:$true`, not a string.
 
-After enforcing PowerShell 7.6+ Core / .NET 10+, the runbook follows its existing
+After qualifying the host under the runtime policy below, the runbook follows its existing
 package download, SHA-256 verification, extraction and exact-path import flow.
 Only after all seven default imports succeed does this mode emit one compact JSON
 receipt (`Kind: Maester.RuntimeValidation`, schema 1) with actual PowerShell/.NET
@@ -84,21 +84,38 @@ sub-mvp gates. Managed identity, optional workloads, assessment, report access,
 retention/rollback and owned cleanup remain separate gates. This mode neither
 publishes changed runbook content nor bypasses the existing preservation contract.
 
-### Temporary service-preview import validation
+### Supported service host and stable runtime policy
 
-An existing lab Automation job configured for PowerShell 7.6 reported
-`7.6.0-preview.5`, Core, and .NET `10.0.9`. This is an observation of that host,
-not proof of the default in newly deployed accounts. Azure Automation documents
-[PowerShell 7.6 GA in July 2026](https://learn.microsoft.com/azure/automation/whats-new#july-2026).
+Fresh and existing lab Automation accounts configured for PowerShell 7.6 reported
+`7.6.0-preview.5`, Core, and .NET `10.0.9`. The fresh-account runtime-only check
+also imported all seven real locked default packages successfully. The maintained
+runbook therefore supports this exact observed service host for ordinary assessment
+as well as runtime-only validation. This is a bounded compatibility exception,
+not a claim that the host reports a stable PowerShell version.
 
-For a bounded import-only diagnostic on that exact host, pass both
-`-RuntimeValidationOnly -AllowRuntimeValidationPreview` to the validation helper.
-Both options default off. The helper submits
-`{"RuntimeValidationOnly":"true","AllowRuntimeValidationPreview":"true"}`.
-The additional exception matches only `7.6.0-preview.5`; Core and .NET 10+
-remain required. Using the preview option without runtime-only mode fails before
-any job creation or runbook work. Ordinary assessment retains its existing version gate and does not receive
-this exception. Receipts retain the observed version, so preview-host import evidence must
-not be described as stable-host qualification. Reevaluate this temporary option
-once a fresh-account host observation and the service/runtime discrepancy are
-resolved; do not generalize it to other prereleases.
+One qualification gate runs before downloads, imports, filesystem work, or workload
+authentication. It accepts Core with either:
+
+- A stable PowerShell release at least 7.6 on .NET 10 or newer.
+- Exactly `7.6.0-preview.5` (case-sensitive, with no added version suffix) on .NET 10.
+
+Every other prerelease is rejected, including newer minor/major previews. Both
+normal execution and `-RuntimeValidationOnly` use the same gate. Runtime-only mode
+still returns immediately after the seven verified imports, and its JSON receipt
+retains the actual observed PowerShell and .NET versions. Normal execution proceeds
+to its unchanged managed-identity connections and workload checks; this host policy
+does not authorize or bypass any workload, permission, publication, or delivery gate.
+
+`AllowRuntimeValidationPreview` remains accepted for compatibility with earlier
+diagnostic callers, but is no longer needed to qualify the observed host. It still
+requires `RuntimeValidationOnly` when set to true and cannot enable any additional
+host. New import-only checks need only `-RuntimeValidationOnly`.
+
+Azure Automation documents
+[PowerShell 7.6 GA in July 2026](https://learn.microsoft.com/en-us/azure/automation/whats-new#july-2026).
+Track the service/version discrepancy and eventual exception removal in
+[issue #45](https://github.com/nathanmcnulty/azd-maester-azureautomation/issues/45).
+Offline entrypoint tests substitute version metadata and isolated package fixtures;
+they prove gate and branch behavior, not native assessment success. Full workload
+execution, identity permissions, optional integrations, report delivery, and cleanup
+remain separate native acceptance gates.

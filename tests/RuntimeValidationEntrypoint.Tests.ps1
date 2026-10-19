@@ -289,47 +289,106 @@ if ($global:runtimeProbe_errorText) { exit 1 }
     Assert-NoValidationReceipt $result
   }
 
-  It 'rejects unsupported host metadata before downloads, imports, or filesystem work: <RuntimeVersion> <RuntimeEdition>' -ForEach @(
-    @{ RuntimeVersion = '7.5.4'; RuntimeEdition = 'Core'; RuntimeDotNet = '10.0.12' },
-    @{ RuntimeVersion = '7.6.0'; RuntimeEdition = 'Desktop'; RuntimeDotNet = '10.0.12' },
-    @{ RuntimeVersion = '7.6.0'; RuntimeEdition = 'Core'; RuntimeDotNet = '9.0.10' }
+  It 'qualifies the observed service host in <Mode> mode with legacy preview flag <PreviewMode>' -ForEach @(
+    @{ Mode = 'omitted'; PreviewMode = 'default' },
+    @{ Mode = 'omitted'; PreviewMode = 'false' },
+    @{ Mode = 'false'; PreviewMode = 'default' },
+    @{ Mode = 'false'; PreviewMode = 'false' },
+    @{ Mode = 'true'; PreviewMode = 'default' },
+    @{ Mode = 'true'; PreviewMode = 'false' },
+    @{ Mode = 'true'; PreviewMode = 'true' }
   ) {
-    $result = Invoke-OfflineRunbook -RuntimeVersion $RuntimeVersion -RuntimeEdition $RuntimeEdition -RuntimeDotNet $RuntimeDotNet
-    $result.ExitCode | Should -Be 1
-    $result.Error | Should -Be ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+. Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $RuntimeVersion, $RuntimeEdition, $RuntimeDotNet, ([version]$RuntimeDotNet).Major)
-    @($result.Output).Count | Should -Be 0
-    @($result.Trace).Count | Should -Be 0
-    Assert-NoValidationReceipt $result
-  }
-  It 'allows only explicitly opted-in exact service preview imports without downstream work' {
-    $result = Invoke-OfflineRunbook -RuntimeVersion '7.6.0-preview.5' -RuntimeEdition 'Core' -RuntimeDotNet '10.0.9' -PreviewMode 'true'
-    $result.ExitCode | Should -Be 0 -Because $result.Error
-    (@($result.Trace | Where-Object Kind -eq 'Import').Name -join ',') | Should -Be ($requiredModules -join ',')
-    @($result.Trace | Where-Object Kind -eq 'Forbidden').Count | Should -Be 0
-    $receipts = @($result.Output | Where-Object { $_ -match '^\{' } | ForEach-Object { $_ | ConvertFrom-Json })
-    $receipts.Count | Should -Be 1
-    $receipts[0].PowerShellVersion | Should -BeExactly '7.6.0-preview.5'
-    $receipts[0].DotNetVersion | Should -BeExactly '10.0.9'
+    $result = Invoke-OfflineRunbook -Mode $Mode -RuntimeVersion '7.6.0-preview.5' -RuntimeEdition 'Core' -RuntimeDotNet '10.0.9' -PreviewMode $PreviewMode
+    foreach ($kind in 'Download', 'Hash', 'Import') {
+      (@($result.Trace | Where-Object Kind -eq $kind).Name -join ',') | Should -Be ($requiredModules -join ',')
+    }
+    if ($Mode -eq 'true') {
+      $result.ExitCode | Should -Be 0 -Because $result.Error
+      @($result.Trace | Where-Object Kind -eq 'Forbidden').Count | Should -Be 0
+      $receipts = @($result.Output | Where-Object { $_ -match '^\{' } | ForEach-Object { $_ | ConvertFrom-Json })
+      $receipts.Count | Should -Be 1
+      $receipts[0].PowerShellVersion | Should -BeExactly '7.6.0-preview.5'
+      $receipts[0].DotNetVersion | Should -BeExactly '10.0.9'
+      @($receipts[0].Modules).Count | Should -Be 7
+    }
+    else {
+      # The ordinary entrypoint must still reach authentication, never the diagnostic return.
+      $result.ExitCode | Should -Be 1
+      $result.Error | Should -Be 'FORBIDDEN_DOWNSTREAM:Connect-AzAccount'
+      (@($result.Trace | Where-Object Kind -eq 'Forbidden').Name -join ',') | Should -Be 'Connect-AzAccount'
+      Assert-NoValidationReceipt $result
+    }
   }
 
-  It 'rejects preview exception misuse before all work: <Version> <Mode> <PreviewMode> <Edition> <DotNet>' -ForEach @(
-    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='default'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='false'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.5'; Mode='default'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.5'; Mode='false'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.5'; Mode='default'; PreviewMode='default'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.4'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.6'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-rc.1'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.5.4'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='true'; Edition='Desktop'; DotNet='10.0.9' },
-    @{ Version='7.6.0-preview.5'; Mode='true'; PreviewMode='true'; Edition='Core'; DotNet='9.0.10' }
+  It 'preserves stable release qualification for <Version> on .NET <DotNet> in <Mode> mode' -ForEach @(
+    foreach ($hostCase in @(
+      @{ Version = '7.6.0'; DotNet = '10.0.0' },
+      @{ Version = '7.6.6'; DotNet = '10.0.12' },
+      @{ Version = '7.7.0'; DotNet = '10.0.12' },
+      @{ Version = '8.0.0'; DotNet = '11.0.0' },
+      @{ Version = '7.6.0+provider.1'; DotNet = '10.0.12' }
+    )) {
+      foreach ($mode in 'omitted', 'false', 'true') {
+        @{ Version = $hostCase.Version; DotNet = $hostCase.DotNet; Mode = $mode }
+      }
+    }
+  ) {
+    $result = Invoke-OfflineRunbook -Mode $Mode -RuntimeVersion $Version -RuntimeEdition 'Core' -RuntimeDotNet $DotNet
+    (@($result.Trace | Where-Object Kind -eq 'Import').Name -join ',') | Should -Be ($requiredModules -join ',')
+    if ($Mode -eq 'true') {
+      $result.ExitCode | Should -Be 0 -Because $result.Error
+      @($result.Trace | Where-Object Kind -eq 'Forbidden').Count | Should -Be 0
+      $receipts = @($result.Output | Where-Object { $_ -match '^\{' } | ForEach-Object { $_ | ConvertFrom-Json })
+      $receipts.Count | Should -Be 1
+      $receipts[0].PowerShellVersion | Should -BeExactly $Version
+      $receipts[0].DotNetVersion | Should -BeExactly $DotNet
+    }
+    else {
+      $result.ExitCode | Should -Be 1
+      $result.Error | Should -Be 'FORBIDDEN_DOWNSTREAM:Connect-AzAccount'
+      (@($result.Trace | Where-Object Kind -eq 'Forbidden').Name -join ',') | Should -Be 'Connect-AzAccount'
+      Assert-NoValidationReceipt $result
+    }
+  }
+
+  It 'rejects unsupported host <Version> <Edition> .NET <DotNet> before all work in <Mode> mode, preview flag <PreviewMode>' -ForEach @(
+    foreach ($hostCase in @(
+      @{ Version = '7.5.99'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0-preview.4'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0-preview.6'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0-rc.1'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '7.7.0-preview.1'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '8.0.0-preview.1'; Edition = 'Core'; DotNet = '11.0.0' },
+      @{ Version = '7.6.0-Preview.5'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0-preview.5+provider.1'; Edition = 'Core'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0-preview.5'; Edition = 'Desktop'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0-preview.5'; Edition = 'Core'; DotNet = '9.0.10' },
+      @{ Version = '7.6.0-preview.5'; Edition = 'Core'; DotNet = '11.0.0' },
+      @{ Version = '7.6.0'; Edition = 'Desktop'; DotNet = '10.0.9' },
+      @{ Version = '7.6.0'; Edition = 'Core'; DotNet = '9.0.10' }
+    )) {
+      foreach ($mode in 'omitted', 'false', 'true', 'legacy-preview') {
+        @{ Version = $hostCase.Version; Edition = $hostCase.Edition; DotNet = $hostCase.DotNet
+           Mode = $(if ($mode -eq 'legacy-preview') { 'true' } else { $mode })
+           PreviewMode = $(if ($mode -eq 'legacy-preview') { 'true' } else { 'default' }) }
+      }
+    }
   ) {
     $result = Invoke-OfflineRunbook -Mode $Mode -RuntimeVersion $Version -RuntimeEdition $Edition -RuntimeDotNet $DotNet -PreviewMode $PreviewMode
     $result.ExitCode | Should -Be 1
-    $result.Error | Should -Match 'requires (RuntimeValidationOnly|PowerShell 7\.6)'
+    $result.Error | Should -Be ('The maintained runbook requires PowerShell 7.6+ Core on .NET 10+ (stable releases, or exactly 7.6.0-preview.5 on .NET 10). Observed PowerShell={0}; PSEdition={1}; EnvironmentVersion={2}; EnvironmentVersionMajor={3}.' -f $Version, $Edition, $DotNet, ([version]$DotNet).Major)
+    @($result.Trace).Count | Should -Be 0
+    @($result.Output).Count | Should -Be 0
+    Assert-NoValidationReceipt $result
+  }
+
+  It 'retains the legacy preview flag runtime-only constraint in <Mode> mode' -ForEach @(
+    @{ Mode = 'omitted' }, @{ Mode = 'false' }
+  ) {
+    $result = Invoke-OfflineRunbook -Mode $Mode -RuntimeVersion '7.6.0-preview.5' -RuntimeEdition 'Core' -RuntimeDotNet '10.0.9' -PreviewMode 'true'
+    $result.ExitCode | Should -Be 1
+    $result.Error | Should -Be 'AllowRuntimeValidationPreview requires RuntimeValidationOnly.'
     @($result.Trace).Count | Should -Be 0
     @($result.Output).Count | Should -Be 0
   }
-
 }
