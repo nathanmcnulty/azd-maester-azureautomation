@@ -6,6 +6,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  POWERSHELL_TELEMETRY_OPTOUT: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  AZURE_CORE_COLLECT_TELEMETRY: 0
+  BICEP_CLI_TELEMETRY_OPTOUT: 1
+
 permissions:
   contents: read
 
@@ -40,6 +46,24 @@ jobs:
           Import-Module Pester -RequiredVersion 6.2.0 -Force
           Write-Host "Validation Pester: $((Get-Module Pester).Version)"
           Invoke-Pester -Path ./tests -CI
+      - name: Qualify actual locked Maester 2.3.0 results offline
+        run: |
+          # Reuse production verification/import logic and reviewed package locks.
+          $tokens = $null; $errors = $null
+          $ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./scripts/Invoke-MaesterAutomationRunbook.ps1), [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw 'Runbook parse failed.' }
+          $lock = $ast.Find({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$runtimePackages' }, $true).Right.Expression.SafeGetValue()
+          $import = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Import-LockedRuntimeModule' }, $true)
+          . ([scriptblock]::Create($import.Extent.Text))
+          $moduleRoot = Join-Path ([IO.Path]::GetTempPath()) "maester-ci-$([guid]::NewGuid().ToString('N'))"
+          New-Item -ItemType Directory -Path $moduleRoot | Out-Null
+          $env:PSModulePath = "$moduleRoot$([IO.Path]::PathSeparator)$env:PSModulePath"
+          try {
+            Import-LockedRuntimeModule -Name Pester -PackageLock $lock -DestinationRoot $moduleRoot
+            Import-LockedRuntimeModule -Name Microsoft.Graph.Authentication -PackageLock $lock -DestinationRoot $moduleRoot
+            $maester = Import-LockedRuntimeModule -Name Maester -PackageLock $lock -DestinationRoot $moduleRoot -PassThru
+            ./tests/Invoke-Maester230Compatibility.ps1 -MaesterManifest (Join-Path $maester.ModuleBase 'Maester.psd1')
+          } finally { Remove-Item -LiteralPath $moduleRoot -Recurse -Force }
       - name: Parse PowerShell
         run: |
           $errors = @()

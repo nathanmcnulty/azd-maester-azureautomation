@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
   [string]$TenantId,
@@ -7,56 +7,45 @@ param(
   [string]$PrincipalObjectId,
 
   [Parameter(Mandatory = $false)]
-  [ValidateSet('Minimal', 'Extended')]
-  [string]$PermissionProfile = 'Extended',
+  [ValidateSet('Minimal', 'Full', 'Extended')]
+  [string]$PermissionProfile = 'Full',
 
   [Parameter(Mandatory = $false)]
   [string[]]$AppRoleValues,
 
   [Parameter(Mandatory = $false)]
-  [bool]$IncludeMailSend = $true
+  [bool]$IncludeMailSend = $false,
+
+  [bool]$IncludeReportSettingsWrite = $false,
+
+  [switch]$Apply,
+
+  [string]$ApprovedPlanHash
 )
 
-$minimalAppRoleValues = @(
-  'Directory.Read.All',
-  'DirectoryRecommendations.Read.All',
-  'IdentityRiskEvent.Read.All',
-  'Policy.Read.All',
-  'Policy.Read.ConditionalAccess',
-  'RoleManagement.Read.All',
-  'Reports.Read.All',
-  'UserAuthenticationMethod.Read.All'
-)
-
-$extendedAppRoleValues = @(
-  'DeviceManagementConfiguration.Read.All',
-  'DeviceManagementServiceConfig.Read.All',
-  'DeviceManagementManagedDevices.Read.All',
-  'DeviceManagementRBAC.Read.All',
-  'PrivilegedAccess.Read.AzureAD',
-  'ReportSettings.Read.All',
-  'RoleEligibilitySchedule.Read.Directory',
-  'SecurityIdentitiesHealth.Read.All',
-  'SecurityIdentitiesSensors.Read.All',
-  'SharePointTenantSettings.Read.All',
-  'ThreatHunting.Read.All'
-)
-
-if (-not $PSBoundParameters.ContainsKey('AppRoleValues')) {
-  $profileRoles = @()
-  if ($PermissionProfile -eq 'Minimal') {
-    $profileRoles = @($minimalAppRoleValues)
-  }
-  else {
-    $profileRoles = @($minimalAppRoleValues + $extendedAppRoleValues)
-  }
-
-  if ($IncludeMailSend) {
-    $profileRoles += 'Mail.Send'
-  }
-
-  $AppRoleValues = $profileRoles
+$manifestPath = Join-Path $PSScriptRoot 'Maester-GraphPermissions.json'
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+if ($manifest.schemaVersion -cne '1.0' -or $manifest.maesterVersion -cne '2.3.0' -or
+    -not $manifest.profiles.ContainsKey($PermissionProfile)) {
+  throw 'Unsupported Maester permission manifest or profile.'
 }
+if (-not $PSBoundParameters.ContainsKey('AppRoleValues')) {
+  $AppRoleValues = @($manifest.profiles[$PermissionProfile])
+  if ($IncludeMailSend) { $AppRoleValues += @($manifest.optionalCapabilities.MailSend) }
+  if ($IncludeReportSettingsWrite) { $AppRoleValues += @($manifest.optionalCapabilities.ReportSettingsWrite) }
+}
+$allowedRoles = @($manifest.profiles.Values | ForEach-Object { $_ }) +
+  @($manifest.optionalCapabilities.Values | ForEach-Object { $_ })
+foreach ($roleValue in $AppRoleValues) {
+  if ($roleValue -match '(?i)(ReadWrite|AccessAsUser|(^|\.)(Write|Create|Delete|Manage)(\.|$))' -and
+      $roleValue -ne 'ReportSettings.ReadWrite.All') {
+    throw "Runtime permission '$roleValue' is write-capable or permission-managing and is not an approved assessment capability."
+  }
+  if ($roleValue -notin $allowedRoles) { throw "Role '$roleValue' is not in the reviewed assessment/capability manifest." }
+  if ($roleValue -eq 'Mail.Send' -and -not $IncludeMailSend) { throw 'Mail.Send requires the separate IncludeMailSend capability.' }
+  if ($roleValue -eq 'ReportSettings.ReadWrite.All' -and -not $IncludeReportSettingsWrite) { throw 'ReportSettings.ReadWrite.All requires the separate IncludeReportSettingsWrite capability.' }
+}
+if (@($AppRoleValues).Count -eq 0) { throw 'At least one reviewed application role must be selected.' }
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -100,8 +89,17 @@ if (-not [guid]::TryParse($PrincipalObjectId, [ref]$principalGuid) -or $principa
 }
 $PrincipalObjectId = $principalGuid.ToString()
 
-Import-Module (Join-Path $PSScriptRoot 'Maester-SetupHelpers.psm1') -Force
-Assert-GraphAccess -TenantId $TenantId -Scopes 'Application.Read.All','AppRoleAssignment.ReadWrite.All','Directory.Read.All','Directory.AccessAsUser.All'
+Import-Module (Join-Path $PSScriptRoot 'Maester-SetupHelpers.psm1')
+# A caller can initialize a broader, explicitly selected setup union once. This
+# standalone command also reuses only an already authorized matching session.
+if (-not (Test-MaesterGraphSession -TenantId $TenantId)) {
+  Assert-GraphAccess -TenantId $TenantId -Scopes (Get-MaesterSetupScopes)
+}
+Import-Module (Join-Path $PSScriptRoot 'Maester-ConsentPlan.psm1') -Force
+$principal = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/${PrincipalObjectId}?`$select=id,appId,servicePrincipalType" -TenantId $TenantId
+if ([string]$principal.id -ine $PrincipalObjectId -or [string]$principal.servicePrincipalType -cne 'ManagedIdentity') {
+  throw 'Assessment application roles may only target the explicitly selected managed identity, never the setup client.'
+}
 
 $graphServicePrincipal = Invoke-GraphRestRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'" -TenantId $TenantId
 if (@($graphServicePrincipal.value).Count -ne 1 -or
@@ -123,9 +121,55 @@ $requestedRoles = @(
     if ($match.Count -ne 1) {
       throw "Exactly one enabled application role '$appRoleValue' must exist on Microsoft Graph."
     }
+    if (-not $manifest.applicationRoles.ContainsKey($appRoleValue) -or
+        [string]$match[0].id -ine [string]$manifest.applicationRoles[$appRoleValue].applicationRoleId) {
+      throw "Application role '$appRoleValue' does not match the reviewed manifest identifier."
+    }
     $match[0]
   }
 )
+$missingRoles = @($requestedRoles | Where-Object {
+  $roleId = $_.id
+  -not @($existingAssignmentList | Where-Object {
+    $_.principalId -eq $PrincipalObjectId -and $_.resourceId -eq $resourceServicePrincipal.id -and $_.appRoleId -eq $roleId
+  }).Count
+})
+# A narrower desired profile does not revoke previously granted capabilities.
+# Show their effective permission surface, including optional writes, during review.
+$existingGraphRoles = @(
+  foreach ($assignment in $existingAssignmentList) {
+    if ($assignment.principalId -ne $PrincipalObjectId -or $assignment.resourceId -ne $resourceServicePrincipal.id) { continue }
+    $existingRole = @($resourceServicePrincipal.appRoles | Where-Object { $_.id -eq $assignment.appRoleId })
+    $roleName = if ($existingRole.Count -eq 1) { [string]$existingRole[0].value } else { 'unresolved-role' }
+    "$($resourceServicePrincipal.id)/$($assignment.appRoleId)/$roleName"
+  }
+) | Sort-Object -Unique
+$existingOptionalCapabilities = @(
+  foreach ($name in @('Mail.Send', 'ReportSettings.ReadWrite.All', 'Sites.Read.All')) {
+    $roleId = $manifest.applicationRoles[$name].applicationRoleId
+    if (@($existingAssignmentList | Where-Object {
+      $_.principalId -eq $PrincipalObjectId -and $_.resourceId -eq $resourceServicePrincipal.id -and $_.appRoleId -eq $roleId
+    }).Count) { $name }
+  }
+)
+$effectiveRoles = @($AppRoleValues) + @($existingOptionalCapabilities)
+$consequences = [ordered]@{}
+foreach ($supplement in @($manifest.reviewedSupplements)) {
+  if ($supplement.role -in $effectiveRoles -and $supplement.ContainsKey('consequence')) {
+    $consequences[$supplement.role] = $supplement.consequence
+  }
+}
+if ('Mail.Send' -in $effectiveRoles) { $consequences['Mail.Send'] = $manifest.capabilityConsequences.MailSend }
+if ('ReportSettings.ReadWrite.All' -in $effectiveRoles) { $consequences['ReportSettings.ReadWrite.All'] = $manifest.capabilityConsequences.ReportSettingsWrite }
+$plan = New-MaesterConsentPlan -TenantId $TenantId -PrincipalObjectId $PrincipalObjectId `
+  -Capability 'GraphApplicationRoles' -ManifestVersion $manifest.manifestVersion `
+  -ManifestSha256 (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+  -Desired @($requestedRoles | ForEach-Object { "$($resourceServicePrincipal.id)/$($_.id)/$($_.value)" }) `
+  -Missing @($missingRoles | ForEach-Object { "$($resourceServicePrincipal.id)/$($_.id)/$($_.value)" }) `
+  -Details @{ maesterVersion = $manifest.maesterVersion; profile = $PermissionProfile; includeMailSend = $IncludeMailSend; includeReportSettingsWrite = $IncludeReportSettingsWrite; consequences = $consequences; preservedExistingGraphRoles = @($existingGraphRoles); preservedExistingOptionalCapabilities = @($existingOptionalCapabilities); existingAccessNotice = 'Existing grants are preserved. A disabled desired capability does not revoke existing access; existing report-setting write authority can still permit tenant privacy changes during assessment. Existing Mail.Send authority alone does not configure or trigger report delivery.' }
+if (-not $Apply) { return $plan }
+Assert-MaesterConsentPlanApproval -Plan $plan -ApprovedPlanHash $ApprovedPlanHash
+
 $createdAssignment = $false
 foreach ($role in $requestedRoles) {
   $alreadyAssigned = @($existingAssignmentList | Where-Object {
@@ -165,4 +209,5 @@ if ($createdAssignment) {
   }
 }
 
-Write-Host 'Graph app role assignment completed.'
+Write-Host 'Graph app role assignment completed and verified.'
+return $plan

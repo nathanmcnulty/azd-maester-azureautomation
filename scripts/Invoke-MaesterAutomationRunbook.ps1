@@ -56,7 +56,7 @@ if ((-not $isStableRuntime -and -not $isObservedServiceRuntime) -or $PSVersionTa
 # contentHash. Verify the bytes again in the runbook before importing modules.
 $runtimePackages = @{
   'Az.Accounts' = @{ Version = '5.5.3'; Sha256 = '5A8BE006E80A7CA66134DF1F28E0EAD93EF4BC437685B647B6720583CB58E615' }
-  'Maester' = @{ Version = '2.2.0'; Sha256 = '8C8A9757771177BD89785262E6B38385CF5E5C19BB799E4399E77F6439AD699C' }
+  'Maester' = @{ Version = '2.3.0'; Sha256 = '95F720822D04271F5E15F4665BC017111DC72E17B97E5D0525CB4EC2FF5BD0B0' }
   'Pester' = @{ Version = '6.2.0'; Sha256 = 'E6AC7418D4F12500269AACA58AE56CF1CAAFBBF1AFA2CEC334E289D1CF50A239' }
   'NuGet' = @{ Version = '1.3.3'; Sha256 = 'FCF1A37925C235159AB1C23249F016E65456EA3A36D0EA42DB85F4F15BF7C033' }
   'PackageManagement' = @{ Version = '1.4.8.1'; Sha256 = '7E1F8A75B6BC8A83D8ABFF79F6690FC1DFBD534FD3E5733D97E19BCB5954C13E' }
@@ -242,7 +242,7 @@ if ($RuntimeValidationOnly) {
 
 # BEGIN shared pure assessment health contract (Container PR #51).
 # Deliberately separate framework health from policy compliance. These are two
-# unconditional core tests in the locked Maester 2.2.0 suite, not a coverage claim.
+# unconditional core tests in the locked Maester 2.3.0 suite, not a coverage claim.
 $script:CoreCases = [ordered]@{
   'MT.1068' = 'Maester/Entra/Test-MtTenantCreationRestricted.Tests.ps1'
   'MT.1069' = 'Maester/Entra/Test-MtSecurityGroupCreationRestricted.Tests.ps1'
@@ -272,7 +272,7 @@ function Get-MaesterAssessmentEvidence {
   $result = $results[0]
   if ($result.EndOfJson -isnot [string] -or $result.EndOfJson -cne 'EndOfJson' -or
       ($result.CurrentVersion -isnot [string] -and $result.CurrentVersion -isnot [version]) -or
-      [string]$result.CurrentVersion -cne '2.2.0') { throw 'assessment.resultInvalid' }
+      [string]$result.CurrentVersion -cne '2.3.0') { throw 'assessment.resultInvalid' }
   $tests = @($result.Tests)
   foreach ($test in $tests) {
     if ($null -eq $test -or $test.Result -isnot [string]) { throw 'assessment.resultInvalid' }
@@ -575,10 +575,10 @@ $tempRoot = Join-Path -Path $env:TEMP -ChildPath ("maester-{0}-{1}" -f (Get-Date
 New-Item -Path $tempRoot -ItemType Directory -Force | Out-Null
 
 $maesterModule = Get-Module -Name Maester |
-  Where-Object { $_.Version -eq [version]'2.2.0' -and $_.Path.StartsWith($verifiedModuleRoot, [StringComparison]::OrdinalIgnoreCase) } |
+  Where-Object { $_.Version -eq [version]'2.3.0' -and $_.Path.StartsWith($verifiedModuleRoot, [StringComparison]::OrdinalIgnoreCase) } |
   Select-Object -First 1
 if (-not $maesterModule) {
-  throw 'Maester module version 2.2.0 was not found after import.'
+  throw 'Maester module version 2.3.0 was not found after import.'
 }
 
 $moduleRoot = Split-Path -Path $maesterModule.Path -Parent
@@ -643,8 +643,13 @@ $previousDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT
 try {
   [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', [System.Management.Automation.Language.NullString]::Value, 'Process')
   $ErrorActionPreference = 'Continue'
-  $invocationErrors = @()
-  $maesterOutput = @(Invoke-Maester @maesterInvokeParameters -ErrorVariable invocationErrors 2>$null 3>$null 4>$null 5>$null 6>$null)
+  # ErrorVariable also captures errors handled inside Maester/Pester (including
+  # policy assertion and skip control flow). Capture only errors emitted across
+  # this invocation boundary; the result/JUnit gate below still inspects every
+  # test ErrorRecord and every engine error without a message/type blacklist.
+  $invocationOutput = @(Invoke-Maester @maesterInvokeParameters 2>&1 3>$null 4>$null 5>$null 6>$null)
+  $invocationErrors = @($invocationOutput | Where-Object { $_ -is [Management.Automation.ErrorRecord] })
+  $maesterOutput = @($invocationOutput | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] })
 }
 catch {
   throw 'assessment.invokeFailed'

@@ -307,7 +307,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
   It 'executes real Setup imports/publication and Exchange branch: <ExchangeMode>' -ForEach @(
     @{ ExchangeMode = 'disabled' }, @{ ExchangeMode = 'valid' }, @{ ExchangeMode = 'wrong tenant' }, @{ ExchangeMode = 'missing token' }, @{ ExchangeMode = 'CLI failure' }
   ) {
-    # Retain every real script/module except the external Graph grant boundary.
+    # Retain real target/token/publication code; replace the external consent boundary.
     $root = Join-Path $TestDrive ('setup-publication-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory $root -Force | Out-Null
     Copy-Item (Join-Path $script:guardRepo 'scripts') $root -Recurse
@@ -315,6 +315,33 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
 param($TenantId, $PrincipalObjectId, $PermissionProfile, $IncludeMailSend)
 $global:targetGuard.GraphGrants++
 if ($TenantId -ne $global:targetGuard.Metadata.tenantId) { throw 'Wrong Graph grant tenant' }
+'@
+    # Replace only the external consent/session boundary. Target validation,
+    # scoped CLI token helpers, Exchange connection and publication stay real.
+    Add-Content (Join-Path $root 'scripts/vendor/Azd.MaesterHooks/Maester-SetupHelpers.psm1') @'
+function Assert-GraphAccess { }
+function Get-MaesterSetupScopes { @('Application.Read.All') }
+function Invoke-GraphRestRequest {
+  param($Method, $Uri)
+  if ($Method -ne 'GET' -or $Uri -notlike '*/organization?*') { throw 'Unexpected Graph consent-boundary request' }
+  [pscustomobject]@{ value = @([pscustomobject]@{ verifiedDomains = @(@{ isInitial = $true; name = 'guard.onmicrosoft.com' }) }) }
+}
+Export-ModuleMember -Function Assert-GraphAccess, Get-MaesterSetupScopes, Invoke-GraphRestRequest
+'@
+    Set-Content (Join-Path $root 'scripts/vendor/Azd.MaesterHooks/Maester-ConsentPlan.psm1') '# Consent is covered by SetupConsent.Tests.ps1'
+    Set-Content (Join-Path $root 'scripts/Maester-SetupConsent.psm1') @'
+function Get-MaesterSetupAccessPlan { [pscustomobject]@{ planHash = 'fixture-approved-plan' } }
+function Invoke-MaesterSetupAccessPlan {
+  param($PlanParameters, $ApprovedPlanHash)
+  if ($ApprovedPlanHash -ne 'fixture-approved-plan') { throw 'Offline setup approval mismatch' }
+  $global:targetGuard.GraphGrants++
+  if ($PlanParameters.IncludeExchange) {
+    New-ServicePrincipal -AppId 'app-guard' -ObjectId $PlanParameters.PrincipalObjectId -DisplayName 'Guard identity' | Out-Null
+    New-ManagementRoleAssignment -Role 'View-Only Configuration' -App $PlanParameters.PrincipalObjectId | Out-Null
+  }
+  [pscustomobject]@{ Receipts = @{ EXO_APPROLE_ASSIGNMENT_IDS = @(); TEAMS_READER_ROLE_ASSIGNMENT_IDS = @(); AZURE_ROLE_ASSIGNMENT_IDS = @() }; EasyAuth = $null; PrincipalDisplayName = 'Guard identity' }
+}
+Export-ModuleMember -Function *
 '@
     $f = $global:targetGuard; $f.AllowSetup = $true
     $exchangeEnabled = $ExchangeMode -ne 'disabled'
@@ -347,7 +374,7 @@ Export-ModuleMember -Function *
     $f.Values.AUTOMATION_JOB_SCHEDULE_ID = $jobId; $f.Values.AUTOMATION_EXISTING_RESOURCES = 'false'
     $failure = $null
     try {
-      & (Join-Path $root 'scripts/Setup-PostDeploy.ps1') -SubscriptionId $script:guardSub -TenantId $script:guardTenant -EnvironmentName guard -ResourceGroupName rg-guard -IncludeExchange:$exchangeEnabled -IncludeTeams:$false -IncludeAzure:$false
+      & (Join-Path $root 'scripts/Setup-PostDeploy.ps1') -SubscriptionId $script:guardSub -TenantId $script:guardTenant -EnvironmentName guard -ResourceGroupName rg-guard -IncludeExchange:$exchangeEnabled -IncludeTeams:$false -IncludeAzure:$false -Apply -ApprovedPlanHash fixture-approved-plan
     } catch { $failure = $_ }
     if ($exchangeEnabled) {
       $exchangeCalls = @($f.Cli | Where-Object { $_ -match '--resource https://outlook.office365.com' })

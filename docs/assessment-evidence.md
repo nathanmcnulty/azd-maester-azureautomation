@@ -1,7 +1,7 @@
 # Automation assessment evidence
 
 `Completed` is a service job state, not proof that Maester ran a healthy assessment.
-The maintained runbook now captures Maester 2.2.0 `-PassThru` output and Pester
+The maintained runbook now captures Maester 2.3.0 `-PassThru` output and Pester
 6.2.0 JUnit evidence before publishing the current report. Policy assertion
 failures remain valid findings. Maester execution errors, unclassified runtime
 exceptions, failed Pester discovery/blocks, missing core cases, inconsistent

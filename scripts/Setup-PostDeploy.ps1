@@ -20,8 +20,8 @@ param(
   [string]$SecurityGroupDisplayName,
 
   [Parameter(Mandatory = $false)]
-  [ValidateSet('Minimal', 'Extended')]
-  [string]$PermissionProfile = 'Extended',
+  [ValidateSet('Minimal', 'Full', 'Extended')]
+  [string]$PermissionProfile = 'Full',
 
   [Parameter(Mandatory = $false)]
   [switch]$IncludeExchange,
@@ -33,7 +33,15 @@ param(
   [switch]$IncludeAzure,
 
   [Parameter(Mandatory = $false)]
-  [string[]]$AzureScopes
+  [string[]]$AzureScopes,
+
+  [switch]$IncludeMailSend,
+  [switch]$IncludeReportSettingsWrite,
+  [switch]$Apply,
+  [string]$ApprovedPlanHash,
+  [switch]$InteractiveConsent,
+  [switch]$AllowInteractiveGraphLogin,
+  [switch]$AllowGraphContextReplacement
 )
 
 Set-StrictMode -Version Latest
@@ -75,8 +83,8 @@ if (-not $EnvironmentName) {
 }
 if (-not $PSBoundParameters.ContainsKey('PermissionProfile') -and $env:PERMISSION_PROFILE) {
   $envPermissionProfile = $env:PERMISSION_PROFILE.Trim()
-  if ($envPermissionProfile -notin @('Minimal', 'Extended')) {
-    throw "PERMISSION_PROFILE must be 'Minimal' or 'Extended'. Current value: '$envPermissionProfile'."
+  if ($envPermissionProfile -notin @('Minimal', 'Full', 'Extended')) {
+    throw "PERMISSION_PROFILE must be 'Minimal', 'Full', or legacy 'Extended'. Current value: '$envPermissionProfile'."
   }
   $PermissionProfile = $envPermissionProfile
 }
@@ -90,6 +98,16 @@ if (-not $SecurityGroupObjectId) {
 }
 if (-not $SecurityGroupDisplayName -and $env:SECURITY_GROUP_DISPLAY_NAME) {
   $SecurityGroupDisplayName = $env:SECURITY_GROUP_DISPLAY_NAME
+}
+
+# Capability selection is distinct from approval of the resulting concrete plan.
+foreach ($capability in @('IncludeMailSend', 'IncludeReportSettingsWrite')) {
+  $environmentKey = if ($capability -eq 'IncludeMailSend') { 'INCLUDE_MAIL_SEND' } else { 'INCLUDE_REPORT_SETTINGS_WRITE' }
+  if (-not $PSBoundParameters.ContainsKey($capability)) {
+    $value = [Environment]::GetEnvironmentVariable($environmentKey)
+    if ($null -ne $value -and $value -notin @('true', 'false')) { throw "$environmentKey must be true or false." }
+    Set-Variable -Name $capability -Value ($value -eq 'true')
+  }
 }
 
 if (-not $PSBoundParameters.ContainsKey('IncludeExchange')) {
@@ -251,266 +269,73 @@ if ($preserveExistingAccess) {
   Write-Host 'Verified existing Automation deployment; preserving all permissions, setup receipts, and Easy Auth settings.'
 }
 else {
-  # ──────────────────────────────────────────────
-  # Storage Blob Data Reader for signed-in user
-  # ──────────────────────────────────────────────
-
-  $storageBlobDataReaderRoleId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/2a2b9908-6ea1-4ae2-8e65-a410df84e7d1"
-
-  $signedInUser = $null
-  try {
-    $signedInUser = Invoke-GraphRestRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/me?$select=id,userPrincipalName,displayName' -TenantId $TenantId
+  # Access planning runs only after every deployment target and ownership guard.
+  Import-Module (Join-Path $PSScriptRoot 'vendor/Azd.MaesterHooks/Maester-ConsentPlan.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot 'Maester-SetupConsent.psm1') -Force
+  $includeWebApp = $null -ne $webApp
+  if ($AllowGraphContextReplacement -and -not $AllowInteractiveGraphLogin) {
+    throw 'Context replacement requires explicit -AllowInteractiveGraphLogin and -AllowGraphContextReplacement.'
   }
-  catch {
-    Write-Warning ("Could not resolve signed-in user from Azure CLI for Storage Blob Data Reader assignment. Error: {0}" -f $_.Exception.Message)
-  }
-
-  if ($signedInUser -and $signedInUser.id) {
-    $existingReaderAssignmentsPath = "$($storageAccount.id)/providers/Microsoft.Authorization/roleAssignments?`$filter=atScope()&api-version=2022-04-01"
-    $existingReaderAssignments = (Invoke-RestMethod -Method GET -Uri "https://management.azure.com$existingReaderAssignmentsPath" -Headers $armHeaders).value
-    $existingReaderAssignment = @($existingReaderAssignments | Where-Object {
-        $_.properties.principalId -eq $signedInUser.id -and $_.properties.roleDefinitionId -eq $storageBlobDataReaderRoleId
-      }) | Select-Object -First 1
-
-    $userLabel = if ($signedInUser.userPrincipalName) { $signedInUser.userPrincipalName } else { $signedInUser.id }
-    if (-not $existingReaderAssignment) {
-      $readerAssignmentName = [guid]::NewGuid().ToString()
-      $readerAssignmentPath = "$($storageAccount.id)/providers/Microsoft.Authorization/roleAssignments/${readerAssignmentName}?api-version=2022-04-01"
-      $readerAssignmentBody = @{
-        properties = @{
-          roleDefinitionId = $storageBlobDataReaderRoleId
-          principalId = $signedInUser.id
-          principalType = 'User'
-        }
-      } | ConvertTo-Json -Depth 10 -Compress
-
-      Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$readerAssignmentPath" -Headers $armHeaders -Body $readerAssignmentBody -ContentType 'application/json' | Out-Null
-      Write-Host "Granted Storage Blob Data Reader on '$($storageAccount.name)' to signed-in user '$userLabel'."
+  if ($InteractiveConsent -and -not $AllowInteractiveGraphLogin) {
+    if ($env:CI -eq 'true' -or $env:AZD_NON_INTERACTIVE -eq 'true' -or [Console]::IsInputRedirected) {
+      throw 'Interactive setup is unavailable. Generate a plan with an existing session, then pass -Apply -ApprovedPlanHash.'
     }
-    else {
-      Write-Host "Storage Blob Data Reader on '$($storageAccount.name)' is already assigned to '$userLabel'."
+    $answer = Read-Host "Allow normal browser sign-in if needed for setup account '$env:MAESTER_SETUP_ACCOUNT' and tenant '$TenantId'? [y/N]"
+    $AllowInteractiveGraphLogin = $answer -match '^(?i:y|yes)$'
+  }
+  Assert-GraphAccess -TenantId $TenantId -ClientId $env:MAESTER_SETUP_CLIENT_ID -ExpectedAccount $env:MAESTER_SETUP_ACCOUNT `
+    -Scopes (Get-MaesterSetupScopes -IncludeTeams:$IncludeTeams -IncludeWebApp:$includeWebApp) `
+    -AllowInteractive:$AllowInteractiveGraphLogin -AllowContextReplacement:$AllowGraphContextReplacement
+
+  if ($IncludeExchange) {
+    # Reading Exchange RBAC is mandatory before approval. No best-effort fallback
+    # can convert a missing module or failed inventory into a grant.
+    if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+      throw 'Install the reviewed ExchangeOnlineManagement module before planning Exchange access.'
     }
+    $organization = Invoke-GraphRestRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains'
+    $domains = @($organization.value | ForEach-Object { $_.verifiedDomains } | Where-Object { $_.isInitial -eq $true })
+    if ($domains.Count -ne 1) { throw 'Exactly one initial tenant domain is required to inspect Exchange access.' }
+    Connect-ExchangeOnlineSilent -Organization $domains[0].name -TenantId $TenantId
   }
-  else {
-    Write-Warning 'Signed-in user object id was not available. Storage Blob Data Reader assignment for user was skipped.'
+  $accessPlanParameters = @{
+    TenantId = $TenantId; SubscriptionId = $SubscriptionId; PrincipalObjectId = $principalId
+    ResourceId = $expectedAutomationAccountId; StorageAccount = $storageAccount; WebApp = $webApp; ArmHeaders = $armHeaders
+    SecurityGroupObjectId = $SecurityGroupObjectId; SecurityGroupDisplayName = $SecurityGroupDisplayName
+    PermissionProfile = $PermissionProfile; IncludeMailSend = [bool]$IncludeMailSend
+    IncludeReportSettingsWrite = [bool]$IncludeReportSettingsWrite
+    IncludeExchange = $IncludeExchange; IncludeTeams = $IncludeTeams; IncludeAzure = $IncludeAzure; AzureScopes = $AzureScopes
   }
-
-  # ──────────────────────────────────────────────
-  # Persist verified Automation managed identity principal
-  # ──────────────────────────────────────────────
-
+  $accessPlan = Get-MaesterSetupAccessPlan @accessPlanParameters
+  Write-Host ($accessPlan | ConvertTo-Json -Depth 30)
+  if ($InteractiveConsent) {
+    $ApprovedPlanHash = Confirm-MaesterConsentPlan -Plan $accessPlan
+    $Apply = $true
+  }
+  if (-not $Apply) {
+    Write-Host 'Plan only. No setup grants, application changes, uploads, or receipts were written. Review the plan and rerun with -Apply -ApprovedPlanHash.'
+    return $accessPlan
+  }
+  $accessResult = Invoke-MaesterSetupAccessPlan -PlanParameters $accessPlanParameters -ApprovedPlanHash $ApprovedPlanHash
   Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_MI_PRINCIPAL_ID' -Value $principalId
 
-  # ──────────────────────────────────────────────
-  # Grant Graph API permissions
-  # ──────────────────────────────────────────────
-
-  $mailRecipientForGraph = if ($env:MAIL_RECIPIENT) { $env:MAIL_RECIPIENT.Trim() } else { '' }
-  $includeMailSend = -not [string]::IsNullOrWhiteSpace($mailRecipientForGraph)
-
-  & (Join-Path $PSScriptRoot 'vendor\Azd.MaesterHooks\Grant-MaesterGraphPermissions.ps1') `
-    -TenantId $TenantId `
-    -PrincipalObjectId $principalId `
-    -PermissionProfile $PermissionProfile `
-    -IncludeMailSend $includeMailSend
-
-  Write-Host "Automation account '$automationAccountName' managed identity is configured for Maester Graph permissions."
-
-  # ──────────────────────────────────────────────
-  # Advanced workload setup (Exchange, Teams, Azure)
-  # ──────────────────────────────────────────────
-
-  $exchangeSetupStatus = if ($IncludeExchange) { 'pending' } else { 'disabled' }
-  $teamsSetupStatus = if ($IncludeTeams) { 'pending' } else { 'disabled' }
-  $azureSetupStatus = if ($IncludeAzure) { 'pending' } else { 'disabled' }
-
-  $exoAppRoleAssignmentIds = @()
-  $teamsRoleAssignmentIds = @()
-  $azureRoleAssignmentIds = @()
-  $exoServicePrincipalDisplayName = $null
-
-  if ($IncludeExchange -or $IncludeTeams) {
-    try {
-      $scopes = @(
-        'Application.Read.All',
-        'AppRoleAssignment.ReadWrite.All',
-        'Directory.Read.All',
-        'Directory.AccessAsUser.All',
-        'RoleManagement.ReadWrite.Directory'
-      )
-      Connect-MgGraphSilent -TenantId $TenantId -Scopes $scopes
-    }
-    catch {
-      $action = Resolve-StepFailureAction -StepName 'Microsoft Graph connection for advanced setup' -Message $_.Exception.Message
-      if ($action -eq 'Stop') {
-        throw
-      }
-      $exchangeSetupStatus = if ($IncludeExchange) { 'skipped' } else { $exchangeSetupStatus }
-      $teamsSetupStatus = if ($IncludeTeams) { 'skipped' } else { $teamsSetupStatus }
-    }
-  }
-
-  if ($IncludeExchange -and $exchangeSetupStatus -eq 'pending') {
-    $exchangeAppRoleOk = $false
-    $exchangeRbacOk = $false
-
-    try {
-      $exchangeResourceAppId = '00000002-0000-0ff1-ce00-000000000000'
-      $exchangeManageAsAppRoleId = [Guid]'dc50a0fb-09a3-484d-be87-e023b12c6440'
-
-      $newAssignmentId = Grant-ServicePrincipalAppRoleAssignment -PrincipalObjectId $principalId -ResourceAppId $exchangeResourceAppId -AppRoleId $exchangeManageAsAppRoleId
-      if ($newAssignmentId) {
-        $exoAppRoleAssignmentIds += $newAssignmentId
-        Write-Host 'Assigned Exchange.ManageAsApp to the Automation Account managed identity.'
-      }
-      else {
-        Write-Host 'Exchange.ManageAsApp is already assigned to the Automation Account managed identity.'
-      }
-      $exchangeAppRoleOk = $true
-    }
-    catch {
-      $action = Resolve-StepFailureAction -StepName 'Exchange app role assignment (Exchange.ManageAsApp)' -Message $_.Exception.Message
-      if ($action -eq 'Stop') {
-        throw
-      }
-    }
-
-    try {
-      $miSp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/${principalId}?`$select=id,appId,displayName"
-      if (-not $miSp -or -not $miSp.appId) {
-        throw 'Could not resolve managed identity service principal appId for Exchange setup.'
-      }
-
-      $exoServicePrincipalDisplayName = $miSp.displayName
-
-      $installMsg = "Exchange Online PowerShell is required to grant the managed identity the Exchange RBAC role 'View-Only Configuration'."
-      if (-not (Maester-SetupHelpers\Test-ModuleAvailable -ModuleName 'ExchangeOnlineManagement' -InstallMessage $installMsg)) {
-        throw 'ExchangeOnlineManagement module is not available. Install it and rerun setup with -IncludeExchange.'
-      }
-
-      # Resolve tenant initial domain for Exchange AccessToken connection
-      $exoOrganization = $null
-      try {
-        $orgResponse = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains'
-        if ($orgResponse.value -and $orgResponse.value.Count -gt 0) {
-          $initialDomain = @($orgResponse.value[0].verifiedDomains | Where-Object { $_.isInitial -eq $true }) | Select-Object -First 1
-          if ($initialDomain) {
-            $exoOrganization = $initialDomain.name
-          }
-        }
-      }
-      catch {
-        Write-Verbose "Could not resolve tenant initial domain: $($_.Exception.Message)"
-      }
-
-      Connect-ExchangeOnlineSilent -Organization $exoOrganization -TenantId $TenantId
-
-      try {
-        New-ServicePrincipal -AppId $miSp.appId -ObjectId $principalId -DisplayName $miSp.displayName | Out-Null
-        Write-Host "Created/linked Exchange service principal for '$($miSp.displayName)'."
-      }
-      catch {
-        Write-Verbose ("New-ServicePrincipal returned an error (often safe to ignore if it already exists): {0}" -f $_.Exception.Message)
-      }
-
-      try {
-        $roleAssignment = New-ManagementRoleAssignment -Role 'View-Only Configuration' -App $miSp.displayName -ErrorAction Stop
-        if ($roleAssignment -and $roleAssignment.Identity) {
-          Write-Host "Assigned Exchange RBAC role 'View-Only Configuration' to '$($miSp.displayName)'."
-        }
-        else {
-          Write-Host "Ensured Exchange RBAC role 'View-Only Configuration' is assigned to '$($miSp.displayName)'."
-        }
-        $exchangeRbacOk = $true
-      }
-      catch {
-        $message = $_.Exception.Message
-        if ($message -match 'already exists') {
-          Write-Host "Exchange RBAC role 'View-Only Configuration' is already assigned to '$($miSp.displayName)'."
-          $exchangeRbacOk = $true
-        }
-        else {
-          throw
-        }
-      }
-    }
-    catch {
-      $action = Resolve-StepFailureAction -StepName 'Exchange RBAC assignment (View-Only Configuration)' -Message $_.Exception.Message
-      if ($action -eq 'Stop') {
-        throw
-      }
-    }
-
-    if ($exchangeAppRoleOk -and $exchangeRbacOk) {
-      $exchangeSetupStatus = 'configured'
-    }
-    else {
-      $exchangeSetupStatus = 'skipped'
-    }
-  }
-
-  if ($IncludeTeams -and $teamsSetupStatus -eq 'pending') {
-    try {
-      $newTeamsRoleAssignmentId = Test-DirectoryRoleAssignment -PrincipalObjectId $principalId -RoleDisplayName 'Teams Reader'
-      if ($newTeamsRoleAssignmentId) {
-        $teamsRoleAssignmentIds += $newTeamsRoleAssignmentId
-        Write-Host "Assigned Entra directory role 'Teams Reader' to the Automation Account managed identity."
-      }
-      else {
-        Write-Host "Entra directory role 'Teams Reader' is already assigned to the Automation Account managed identity."
-      }
-
-      $teamsSetupStatus = 'configured'
-    }
-    catch {
-      $action = Resolve-StepFailureAction -StepName "Teams Reader role assignment" -Message $_.Exception.Message
-      if ($action -eq 'Stop') {
-        throw
-      }
-      $teamsSetupStatus = 'skipped'
-    }
-  }
-
-  if ($IncludeAzure -and $azureSetupStatus -eq 'pending') {
-    $succeededScopes = 0
-    foreach ($scope in @($AzureScopes)) {
-      if ([string]::IsNullOrWhiteSpace($scope)) {
-        continue
-      }
-
-      try {
-        $newAzureAssignmentId = Test-AzureReaderRoleAssignment -Scope $scope -PrincipalObjectId $principalId -SubscriptionId $SubscriptionId
-        if ($newAzureAssignmentId) {
-          $azureRoleAssignmentIds += $newAzureAssignmentId
-          Write-Host "Granted Azure RBAC Reader to Automation managed identity at scope: $scope"
-        }
-        else {
-          Write-Host "Azure RBAC Reader already exists or was already satisfied at scope: $scope"
-        }
-        $succeededScopes++
-      }
-      catch {
-        $action = Resolve-StepFailureAction -StepName "Azure RBAC Reader assignment at scope $scope" -Message $_.Exception.Message
-        if ($action -eq 'Stop') {
-          throw
-        }
-        continue
-      }
-    }
-
-    $azureSetupStatus = if ($succeededScopes -gt 0) { 'configured' } else { 'skipped' }
-  }
-
+  $exchangeSetupStatus = if ($IncludeExchange) { 'configured' } else { 'disabled' }
+  $teamsSetupStatus = if ($IncludeTeams) { 'configured' } else { 'disabled' }
+  $azureSetupStatus = if ($IncludeAzure) { 'configured' } else { 'disabled' }
   Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_EXCHANGE_STATUS' -Value $exchangeSetupStatus
   Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_TEAMS_STATUS' -Value $teamsSetupStatus
   Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'SETUP_AZURE_STATUS' -Value $azureSetupStatus
-
-  Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'EXO_APPROLE_ASSIGNMENT_IDS' -Values @($exoAppRoleAssignmentIds)
-  Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'TEAMS_READER_ROLE_ASSIGNMENT_IDS' -Values @($teamsRoleAssignmentIds)
-  Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name 'AZURE_ROLE_ASSIGNMENT_IDS' -Values @($azureRoleAssignmentIds)
-
-  if ($exoServicePrincipalDisplayName) {
-    Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME' -Value $exoServicePrincipalDisplayName
+  foreach ($receiptName in @('EXO_APPROLE_ASSIGNMENT_IDS', 'TEAMS_READER_ROLE_ASSIGNMENT_IDS', 'AZURE_ROLE_ASSIGNMENT_IDS')) {
+    Set-MaesterAzdEnvJsonArray -EnvironmentName $EnvironmentName -Name $receiptName -Values @($accessResult.Receipts[$receiptName])
+  }
+  if ($IncludeExchange) {
+    Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EXO_SERVICE_PRINCIPAL_DISPLAY_NAME' -Value $accessResult.PrincipalDisplayName
+  }
+  if ($accessResult.EasyAuth) {
+    Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_OBJECT_ID' -Value $accessResult.EasyAuth.objectId
+    Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_CLIENT_ID' -Value $accessResult.EasyAuth.clientId
+    Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_DISPLAY_NAME' -Value $accessResult.EasyAuth.displayName
+    $SecurityGroupObjectId = $accessResult.EasyAuth.securityGroupId
   }
 
 }
@@ -553,233 +378,6 @@ if ($publishLocalContent) {
 }
 else {
   Write-Host "Published runbook '$runbookName' already matches the local script; publication was skipped."
-}
-
-# ──────────────────────────────────────────────
-# Easy Auth on optional Web App
-# ──────────────────────────────────────────────
-
-if ($webApp -and -not $preserveExistingAccess) {
-  if (-not $SecurityGroupObjectId -and -not [string]::IsNullOrWhiteSpace($SecurityGroupDisplayName)) {
-    Connect-MgGraphSilent -TenantId $TenantId -Scopes 'Group.Read.All','Directory.Read.All'
-
-    $escapedDisplayName = [System.Uri]::EscapeDataString("'$SecurityGroupDisplayName'")
-    $groupsResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq $escapedDisplayName&`$select=id,displayName,description&`$top=25"
-    $groupMatches = @($groupsResponse.value)
-
-    if ($groupMatches.Count -eq 0) {
-      throw "No Entra security groups found with display name '$SecurityGroupDisplayName'."
-    }
-
-    if ($groupMatches.Count -eq 1) {
-      $SecurityGroupObjectId = $groupMatches[0].id
-      Write-Host "Resolved security group '$SecurityGroupDisplayName' to object ID '$SecurityGroupObjectId'."
-    }
-    else {
-      $canPrompt = $false
-      try {
-        $null = $Host.UI.RawUI
-        $canPrompt = $true
-      }
-      catch {
-        $canPrompt = $false
-      }
-
-      if (-not $canPrompt) {
-        throw "Multiple Entra security groups matched '$SecurityGroupDisplayName'. Provide SecurityGroupObjectId to avoid ambiguity."
-      }
-
-      Write-Host "Multiple groups matched '$SecurityGroupDisplayName'. Select one:"
-      for ($index = 0; $index -lt $groupMatches.Count; $index++) {
-        $item = $groupMatches[$index]
-        $description = if ($item.description) { $item.description } else { 'n/a' }
-        Write-Host ("[{0}] {1} ({2})" -f ($index + 1), $item.displayName, $description)
-      }
-
-      $selection = Read-Host 'Enter selection number'
-      $selectionValue = 0
-      if (-not [int]::TryParse($selection, [ref]$selectionValue)) {
-        throw 'Selection was not a valid number.'
-      }
-
-      $selectionIndex = $selectionValue - 1
-      if ($selectionIndex -lt 0 -or $selectionIndex -ge $groupMatches.Count) {
-        throw 'Selection is out of range.'
-      }
-
-      $SecurityGroupObjectId = $groupMatches[$selectionIndex].id
-      Write-Host "Selected security group object ID: $SecurityGroupObjectId"
-    }
-  }
-
-  if (-not $SecurityGroupObjectId) {
-    $canPrompt = $false
-    try {
-      $null = $Host.UI.RawUI
-      $canPrompt = $true
-    }
-    catch {
-      $canPrompt = $false
-    }
-
-    if ($canPrompt) {
-      $SecurityGroupObjectId = Read-Host "Optional Web App detected. Enter Entra security group object ID to allow access via Easy Auth"
-      $securityGroupSource = 'interactive-prompt'
-    }
-  }
-
-  if (-not $SecurityGroupObjectId) {
-    throw 'SecurityGroupObjectId is required to configure Easy Auth when includeWebApp=true. Provide -SecurityGroupObjectId, set SECURITY_GROUP_OBJECT_ID, or set EASY_AUTH_SECURITY_GROUP_OBJECT_ID.'
-  }
-
-  Connect-MgGraphSilent -TenantId $TenantId -Scopes 'Application.ReadWrite.All','Directory.Read.All','DelegatedPermissionGrant.ReadWrite.All'
-
-  $webAppName = $webApp.name
-  $webAppHostName = $webApp.properties.defaultHostName
-  $redirectUri = "https://$webAppHostName/.auth/login/aad/callback"
-  $easyAuthDisplayName = "maester-easyauth-$webAppName"
-
-  $encodedDisplayName = [System.Uri]::EscapeDataString("'$easyAuthDisplayName'")
-  $existingAppResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=displayName eq $encodedDisplayName"
-  $desiredRedirectUris = @($redirectUri)
-  $aadApp = if ($existingAppResponse.value -and $existingAppResponse.value.Count -gt 0) {
-    $existingApp = $existingAppResponse.value[0]
-
-    $existingRedirectUris = @()
-    if ($existingApp.web -and $existingApp.web.redirectUris) {
-      $existingRedirectUris = @($existingApp.web.redirectUris)
-    }
-
-    $mergedRedirectUris = @($existingRedirectUris + $desiredRedirectUris | Sort-Object -Unique)
-    $updateAppBody = @{
-      groupMembershipClaims = 'SecurityGroup'
-      web = @{
-        redirectUris = $mergedRedirectUris
-        implicitGrantSettings = @{
-          enableIdTokenIssuance = $true
-          enableAccessTokenIssuance = $false
-        }
-      }
-    } | ConvertTo-Json -Depth 10
-
-    Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/applications/$($existingApp.id)" -Body $updateAppBody -ContentType 'application/json' | Out-Null
-    Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications/$($existingApp.id)?`$select=id,appId,displayName,groupMembershipClaims,web"
-  }
-  else {
-    $createAppBody = @{
-      displayName = $easyAuthDisplayName
-      signInAudience = 'AzureADMyOrg'
-      groupMembershipClaims = 'SecurityGroup'
-      web = @{
-        redirectUris = $desiredRedirectUris
-        implicitGrantSettings = @{
-          enableIdTokenIssuance = $true
-          enableAccessTokenIssuance = $false
-        }
-      }
-    } | ConvertTo-Json -Depth 10
-    Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/applications' -Body $createAppBody -ContentType 'application/json'
-  }
-
-  Write-Host "Persisting Easy Auth Entra app identifiers to azd environment variables..."
-  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_OBJECT_ID' -Value $aadApp.id
-  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_CLIENT_ID' -Value $aadApp.appId
-  Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'EASY_AUTH_ENTRA_APP_DISPLAY_NAME' -Value $aadApp.displayName
-
-  $servicePrincipalResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$($aadApp.appId)'"
-  $easyAuthServicePrincipal = $null
-  if (-not $servicePrincipalResponse.value -or $servicePrincipalResponse.value.Count -eq 0) {
-    $spBody = @{ appId = $aadApp.appId } | ConvertTo-Json
-    $easyAuthServicePrincipal = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/servicePrincipals' -Body $spBody -ContentType 'application/json'
-  }
-  else {
-    $easyAuthServicePrincipal = $servicePrincipalResponse.value[0]
-  }
-
-  $graphSpResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id"
-  if (-not $graphSpResponse.value -or $graphSpResponse.value.Count -eq 0) {
-    throw 'Microsoft Graph service principal was not found while configuring Easy Auth admin consent.'
-  }
-
-  $graphSpId = $graphSpResponse.value[0].id
-  $consentScope = 'openid profile email User.Read'
-  $existingGrantResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$($easyAuthServicePrincipal.id)' and resourceId eq '$graphSpId' and consentType eq 'AllPrincipals'"
-  if ($existingGrantResponse.value -and $existingGrantResponse.value.Count -gt 0) {
-    $existingGrant = $existingGrantResponse.value[0]
-    $currentScopes = @()
-    if ($existingGrant.scope) {
-      $currentScopes = @($existingGrant.scope -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    }
-
-    $requiredScopes = @($consentScope -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $mergedScopes = @($currentScopes + $requiredScopes | Sort-Object -Unique)
-    $mergedScopeString = $mergedScopes -join ' '
-
-    if ($mergedScopeString -ne $existingGrant.scope) {
-      $patchGrantBody = @{ scope = $mergedScopeString } | ConvertTo-Json
-      Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($existingGrant.id)" -Body $patchGrantBody -ContentType 'application/json' | Out-Null
-    }
-  }
-  else {
-    $grantBody = @{
-      clientId = $easyAuthServicePrincipal.id
-      consentType = 'AllPrincipals'
-      resourceId = $graphSpId
-      scope = $consentScope
-    } | ConvertTo-Json
-
-    Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants' -Body $grantBody -ContentType 'application/json' | Out-Null
-  }
-
-  $authPayload = @{
-    properties = @{
-      platform = @{
-        enabled = $true
-      }
-      globalValidation = @{
-        requireAuthentication = $true
-        unauthenticatedClientAction = 'RedirectToLoginPage'
-      }
-      httpSettings = @{
-        requireHttps = $true
-      }
-      identityProviders = @{
-        azureActiveDirectory = @{
-          enabled = $true
-          registration = @{
-            clientId = $aadApp.appId
-            openIdIssuer = "https://login.microsoftonline.com/$TenantId/v2.0"
-          }
-          validation = @{
-            allowedAudiences = @("https://$webAppHostName")
-            defaultAuthorizationPolicy = @{
-              allowedPrincipals = @{
-                groups = @($SecurityGroupObjectId)
-              }
-            }
-          }
-        }
-      }
-      login = @{
-        routes = @{}
-      }
-    }
-  } | ConvertTo-Json -Depth 15 -Compress
-
-  $authPath = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroupName/providers/Microsoft.Web/sites/$webAppName/config/authsettingsV2?api-version=2023-12-01"
-  Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$authPath" -Headers $armHeaders -Body $authPayload -ContentType 'application/json' | Out-Null
-
-  Write-Host "Configured Easy Auth for Web App '$webAppName'."
-  Write-Host "Easy Auth Entra app display name: $easyAuthDisplayName"
-  Write-Host "Easy Auth Entra app objectId: $($aadApp.id)"
-  Write-Host "Easy Auth Entra app clientId: $($aadApp.appId)"
-  Write-Host "Easy Auth issuer: https://login.microsoftonline.com/$TenantId/v2.0"
-  Write-Host "Easy Auth groupMembershipClaims: $($aadApp.groupMembershipClaims)"
-  if ($aadApp.web -and $aadApp.web.implicitGrantSettings) {
-    Write-Host "Easy Auth implicit id_token enabled: $($aadApp.web.implicitGrantSettings.enableIdTokenIssuance)"
-  }
-  Write-Host "Easy Auth admin consent scopes: $consentScope"
-  Write-Host "Easy Auth security group: $SecurityGroupObjectId (source: $securityGroupSource)"
 }
 
 # The infrastructure creates the weekly schedule without an association. Attach it

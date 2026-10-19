@@ -18,7 +18,7 @@ After `azd init -t nathanmcnulty/azd-maester-azureautomation`, run from the temp
 
 ## Versioning and shared components
 
-This template uses the stable Maester module `2.2.0`. Shared azd hooks,
+This template uses the stable Maester module `2.3.0`. Shared azd hooks,
 permission setup, and the optional report web app are vendored from
 `nathanmcnulty/azd-reference` and recorded in `azd-components.lock.json`.
 
@@ -42,7 +42,7 @@ You can optionally enable additional data collection/connectivity for Maester by
 - `IncludeExchange`
   - Installs `ExchangeOnlineManagement` into the Automation runtime.
   - Grants the Automation Account managed identity the Exchange app permission required for app-only Exchange Online access.
-  - Creates/links an Exchange service principal for the managed identity and assigns the Exchange RBAC role `View-Only Configuration` (best-effort).
+  - Creates/links an Exchange service principal for the managed identity and assigns the Exchange RBAC role `View-Only Configuration` after reviewing the exact existing-state delta.
 - `IncludeTeams`
   - Installs `MicrosoftTeams` into the Automation runtime.
   - Assigns the Entra directory role `Teams Reader` to the Automation Account managed identity.
@@ -58,9 +58,10 @@ See [upgrade preservation](docs/upgrade-preservation.md) for freshly verified sc
 
 - Azure RBAC, Entra directory roles, Exchange assignments, and Microsoft Graph app-role assignments are separate authorities.
 - Some environments already have the required Microsoft Graph permissions consented and assigned. If Graph consent has not been completed previously, the deployment may require a **Global Administrator or Privileged Role Administrator**. See the selected profile and permission sections for solution-specific details.
-- If a step fails due to missing privileges, the scripts will:
-  - Prompt you to **Stop** or **Skip** in interactive runs.
-  - Default to **Skip + continue** in non-interactive runs (CI).
+- Setup uses an administrator-bootstrapped tenant-owned public client and an explicitly selected operator account. It reuses a matching bound Graph session by default.
+- Permission changes require review of a versioned plan: interactive approval defaults to No, and noninteractive application requires the exact approved plan hash. Failed or incomplete inventories stop setup before access changes.
+- Full is the new wizard default; No selects Minimal. Existing Extended settings retain their legacy role set. Mail and report-setting writes remain separate opt-in capabilities.
+- See [setup and consent migration](docs/setup-consent-migration.md) and [Maester 2.3.0 upgrade notes](docs/maester-230-upgrade.md).
 - Toggling an option from `Yes` to `No` in a later `azd up` run is additive only and does **not** revoke prior assignments.
 - Revocation/best-effort cleanup runs on `azd down` (predown hook).
 
@@ -75,7 +76,7 @@ What this does:
 - **WebApp**: Quick + Web App (Entra auth restricted by security group)
 
 For a manual postprovision retry after a successful provision, run
-`./scripts/Setup-PostDeploy.ps1 -EnvironmentName <selected-environment> -SubscriptionId <selected-subscription> -ResourceGroupName <deployed-resource-group>`.
+`./scripts/Setup-PostDeploy.ps1 -EnvironmentName <selected-environment> -SubscriptionId <selected-subscription> -TenantId <selected-tenant> -ResourceGroupName <deployed-resource-group>` to generate a read-only plan. Review it, then rerun with `-Apply -ApprovedPlanHash <reviewed-hash>` or use `-InteractiveConsent`.
 Setup reads that environment's exact `STORAGE_ACCOUNT_NAME`,
 `automationAccountName`, `automationPrincipalId`, and optional `WEB_APP_NAME`
 and `WEB_APP_ENABLED` deployment outputs. A false enablement output skips Easy
@@ -96,7 +97,7 @@ after verifying the published local runbook and exact live association.
 
 Defaults:
 
-- `PERMISSION_PROFILE=Extended`
+- `PERMISSION_PROFILE=Full` (legacy `Extended` remains distinct)
 - `WEB_APP_SKU=F1`
 - resource group pattern: `rg-<environment>-<location>` (override with `AZURE_RESOURCE_GROUP`)
 
@@ -133,7 +134,7 @@ The generated setup summary in `outputs/<env>-setup-summary.md` includes tracked
   - `archive/maester-report-<timestamp>.html.gz`
   - `latest/latest.html`
 - In WebApp mode, latest report is published to Web App `index.html`
-- Entra auth via app registration is configured automatically. Existing Microsoft Graph consent and app-role assignments are reused; if they are not already present, the first run may require a **Global Administrator or Privileged Role Administrator**.
+- Entra auth via app registration is configured after the setup access plan is explicitly approved. Existing Microsoft Graph consent and app-role assignments are reused; if they are not already present, the first run may require a **Global Administrator or Privileged Role Administrator**.
 - Signed-in deployment user is granted `Storage Blob Data Reader` on the solution storage account
 - Blob soft delete is enabled for 1 day, with blob versioning disabled
 - Archive uploads are gzip compressed and written directly to Cool tier

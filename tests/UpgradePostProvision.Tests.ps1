@@ -132,6 +132,10 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
   function Get-AzCliSubscriptionContext { }
   function Get-AzCliAccessToken { }
   function ConvertTo-BoolOrDefault { param($Value, $Default) if ($Value) { return $Value -eq 'true' }; return $Default }
+  function Assert-GraphAccess { }
+  function Get-MaesterSetupScopes { @('Application.Read.All') }
+  function Get-MaesterSetupAccessPlan { [pscustomobject]@{ planHash = 'fixture-approved-plan'; capability = 'DeploymentSetupAccess' } }
+  function Invoke-MaesterSetupAccessPlan { }
   function Invoke-GraphRestRequest { }
   function Connect-MgGraphSilent { }
   function Invoke-MgGraphRequest { }
@@ -168,6 +172,9 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     $fixture.RuntimePatchAttempts | Should -Be 0
     $fixture.ValidationCalls | Should -Be 0
     $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
     Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
     Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
@@ -208,6 +215,9 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|DELETE) |azd env set|/draft|/publish\?|/jobs\?|/roleAssignments|graph.microsoft.com'
     $fixture.ValidationCalls | Should -Be 0
     $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
     Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
     Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
@@ -216,7 +226,7 @@ $global:upgradeFixture.ValidatedAccount = $AutomationAccountName
     Should -Invoke Test-AzureReaderRoleAssignment -Times 0 -Exactly
   }
   function Invoke-UpgradeSetup {
-    & (Join-Path $global:upgradeFixture.Scripts 'Setup-PostDeploy.ps1') -SubscriptionId $global:upgradeFixture.Values.AZURE_SUBSCRIPTION_ID -EnvironmentName test -ResourceGroupName rg-test -TenantId tenant-test
+    & (Join-Path $global:upgradeFixture.Scripts 'Setup-PostDeploy.ps1') -SubscriptionId $global:upgradeFixture.Values.AZURE_SUBSCRIPTION_ID -EnvironmentName test -ResourceGroupName rg-test -TenantId tenant-test -Apply -ApprovedPlanHash fixture-approved-plan
   }
   function Invoke-UpgradeWrapper {
     & (Join-Path $global:upgradeFixture.Scripts 'Run-AzdPostProvision.ps1') -SubscriptionId $global:upgradeFixture.Values.AZURE_SUBSCRIPTION_ID -EnvironmentName test -ResourceGroupName rg-test -TenantId tenant-test
@@ -247,6 +257,12 @@ Describe 'Existing upgrade postdeployment preservation' {
       if ($args[1] -eq 'get-values') { return ($global:upgradeFixture.Values | ConvertTo-Json -Depth 30 -Compress) }
       if ($args[1] -eq 'set') { $global:upgradeFixture.Values[[string]$args[4]] = [string]$args[5]; return }
       throw "Unexpected azd call: $args"
+    }
+    Mock Assert-GraphAccess { }
+    Mock Get-MaesterSetupAccessPlan { [pscustomobject]@{ planHash = 'fixture-approved-plan'; capability = 'DeploymentSetupAccess' } }
+    Mock Invoke-MaesterSetupAccessPlan {
+      $global:upgradeFixture.GraphGrantCalls++
+      [pscustomobject]@{ Receipts = @{ EXO_APPROLE_ASSIGNMENT_IDS = @(); TEAMS_READER_ROLE_ASSIGNMENT_IDS = @(); AZURE_ROLE_ASSIGNMENT_IDS = @() }; EasyAuth = $null; PrincipalDisplayName = 'offline' }
     }
     Mock Invoke-GraphRestRequest { throw 'Graph access must not run in preservation mode.' }
     Mock Connect-MgGraphSilent { throw 'Graph connection must not run in preservation mode.' }
@@ -343,6 +359,17 @@ Describe 'Existing upgrade postdeployment preservation' {
     $global:LASTEXITCODE = 0
   }
 
+  It 'returns the reviewed-access plan before uploads grants or receipts when Apply is absent' {
+    $global:upgradeFixture.Values.AUTOMATION_UPGRADE_PRESERVE_ACCESS = 'false'
+    $global:upgradeFixture.Values.WEB_APP_ENABLED = 'false'
+    $result = & (Join-Path $global:upgradeFixture.Scripts 'Setup-PostDeploy.ps1') -SubscriptionId $global:upgradeFixture.Values.AZURE_SUBSCRIPTION_ID -EnvironmentName test -ResourceGroupName rg-test -TenantId tenant-test
+    $result.capability | Should -BeExactly 'DeploymentSetupAccess'
+    ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+    Should -Invoke Assert-GraphAccess -Times 1 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 1 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
+  }
+
   It 'does no writes or grants when published local content already matches and retains all receipts and properties' {
     $beforeValues = $global:upgradeFixture.Values | ConvertTo-Json -Depth 30 -Compress
     $beforeJob = $global:upgradeFixture.Job | ConvertTo-Json -Depth 30 -Compress
@@ -352,6 +379,9 @@ Describe 'Existing upgrade postdeployment preservation' {
     $global:upgradeFixture.Job | ConvertTo-Json -Depth 30 -Compress | Should -BeExactly $beforeJob
     $global:upgradeFixture.Schedule | ConvertTo-Json -Depth 30 -Compress | Should -BeExactly $beforeSchedule
     ($global:upgradeFixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
     Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
     Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
@@ -829,6 +859,9 @@ Describe 'Existing upgrade postdeployment preservation' {
     }
     ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
     $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
     Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
     Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
@@ -887,6 +920,9 @@ Describe 'Existing upgrade postdeployment preservation' {
     ($fixture.ReadbackJob | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $beforeReadback
     ($fixture.Calls -join '|') | Should -Not -Match '\b(PUT|POST|PATCH|DELETE) |azd env set'
     $fixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
     Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
     Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
@@ -918,6 +954,9 @@ Describe 'Existing upgrade postdeployment preservation' {
     $global:upgradeFixture.Values | ConvertTo-Json -Depth 30 -Compress | Should -BeExactly $beforeValues
     $global:upgradeFixture.PublishedContent | Should -BeExactly '# different published runbook'
     $global:upgradeFixture.GraphGrantCalls | Should -Be 0
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
     Should -Invoke Connect-MgGraphSilent -Times 0 -Exactly
     Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
@@ -1179,6 +1218,9 @@ Describe 'Existing upgrade postdeployment preservation' {
     $global:upgradeFixture.ValidationCalls | Should -Be 1
     $global:upgradeFixture.ValidatedAccount | Should -Be 'aa-exact-output'
     Get-Content (Join-Path $global:upgradeFixture.Root 'outputs/test-setup-summary.md') -Raw | Should -Match 'Runbook validation status: Skipped'
+    Should -Invoke Assert-GraphAccess -Times 0 -Exactly
+    Should -Invoke Get-MaesterSetupAccessPlan -Times 0 -Exactly
+    Should -Invoke Invoke-MaesterSetupAccessPlan -Times 0 -Exactly
     Should -Invoke Invoke-GraphRestRequest -Times 0 -Exactly
   }
 
