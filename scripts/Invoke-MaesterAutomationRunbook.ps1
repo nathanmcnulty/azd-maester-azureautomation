@@ -24,7 +24,13 @@ param(
 
   # Retained for existing diagnostic callers; host qualification is shared by both modes.
   [Parameter(Mandatory = $false)]
-  [bool]$AllowRuntimeValidationPreview = $false
+  [bool]$AllowRuntimeValidationPreview = $false,
+
+  # Caller correlation only; Azure's job-specific output/content APIs bind the job.
+  [string]$ValidationJobId = '',
+
+  # Qualification must reject configured upstream mail before Invoke-Maester.
+  [bool]$RequireNoMail = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -234,6 +240,131 @@ if ($RuntimeValidationOnly) {
   return
 }
 
+# BEGIN shared pure assessment health contract (Container PR #51).
+# Deliberately separate framework health from policy compliance. These are two
+# unconditional core tests in the locked Maester 2.2.0 suite, not a coverage claim.
+$script:CoreCases = [ordered]@{
+  'MT.1068' = 'Maester/Entra/Test-MtTenantCreationRestricted.Tests.ps1'
+  'MT.1069' = 'Maester/Entra/Test-MtSecurityGroupCreationRestricted.Tests.ps1'
+}
+
+function Get-EvidenceCount {
+  param($Value)
+  if ($null -eq $Value -or $Value -is [bool] -or $Value -is [string] -or
+      $Value -isnot [ValueType] -or $Value -lt 0 -or $Value -gt [int]::MaxValue -or
+      [decimal]$Value -ne [math]::Truncate([decimal]$Value)) { throw 'assessment.invalidCount' }
+  [int]$Value
+}
+
+function Get-MaesterAssessmentEvidence {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$Output,
+    [Parameter(Mandatory)][string]$JunitPath,
+    [Parameter(Mandatory)][string]$TestsPath,
+    [Parameter(Mandatory)][string]$ReportPath
+  )
+  $ErrorActionPreference = 'Stop'
+  # Ignore incidental success-stream strings, but never select one of multiple
+  # result objects. No HTML/JavaScript is evaluated to recover missing evidence.
+  $results = @($Output | Where-Object { $null -ne $_ -and $_.PSObject.Properties['Tests'] })
+  if ($results.Count -ne 1) { throw 'assessment.resultMissingOrAmbiguous' }
+  $result = $results[0]
+  if ($result.EndOfJson -isnot [string] -or $result.EndOfJson -cne 'EndOfJson' -or
+      ($result.CurrentVersion -isnot [string] -and $result.CurrentVersion -isnot [version]) -or
+      [string]$result.CurrentVersion -cne '2.2.0') { throw 'assessment.resultInvalid' }
+  $tests = @($result.Tests)
+  foreach ($test in $tests) {
+    if ($null -eq $test -or $test.Result -isnot [string]) { throw 'assessment.resultInvalid' }
+  }
+  $counts = [ordered]@{}
+  foreach ($state in 'Passed','Failed','Error','Investigate','Skipped','NotRun') {
+    $name = $state + 'Count'
+    $counts[$name] = Get-EvidenceCount $result.$name
+    if ($counts[$name] -ne @($tests | Where-Object Result -CEQ $state).Count) { throw 'assessment.countMismatch' }
+  }
+  $counts.TotalCount = Get-EvidenceCount $result.TotalCount
+  $sum = 0L
+  foreach ($state in 'Passed','Failed','Error','Investigate','Skipped','NotRun') { $sum += $counts[$state + 'Count'] }
+  if ($sum -ne $counts.TotalCount -or $tests.Count -ne $counts.TotalCount -or $sum -eq 0) { throw 'assessment.countMismatch' }
+  if ($counts.ErrorCount -ne 0) { throw 'assessment.maesterErrors' }
+  # Maester reclassifies only selected exception types. An IOException or a
+  # mixed assertion/runtime error can still be labelled Failed (or Investigate).
+  # Check every record, never only the first, using Pester's stable marker IDs.
+  foreach ($test in $tests) {
+    if (-not $test.PSObject.Properties['ErrorRecord']) { throw 'assessment.errorRecordsMissing' }
+    $records = @($test.ErrorRecord | Where-Object { $null -ne $_ })
+    $allowed = switch ($test.Result) {
+      'Failed' { @('PesterAssertionFailed') }
+      'Skipped' { @('PesterTestSkipped') }
+      'Investigate' { @('PesterAssertionFailed','PesterTestSkipped','PesterTestInconclusive') }
+      default { @() }
+    }
+    if ($test.Result -ceq 'Failed' -and $records.Count -eq 0) { throw 'assessment.unclassifiedFailure' }
+    foreach ($record in $records) {
+      if ($record.FullyQualifiedErrorId -isnot [string] -or $record.FullyQualifiedErrorId -cnotin $allowed) { throw 'assessment.unclassifiedFailure' }
+    }
+  }
+  $core = [ordered]@{}
+  foreach ($id in $script:CoreCases.Keys) {
+    $matches = @($tests | Where-Object Id -CEQ $id)
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $TestsPath $script:CoreCases[$id]))
+    if ($matches.Count -ne 1 -or $matches[0].Result -cnotin @('Passed','Failed') -or
+        [string]::IsNullOrWhiteSpace($matches[0].ScriptBlockFile) -or
+        [IO.Path]::GetFullPath($matches[0].ScriptBlockFile) -cne $expectedPath) { throw 'assessment.coreNotExecuted' }
+    $core[$id] = $matches[0].Result
+  }
+  $reader = $null
+  try {
+    $settings = [Xml.XmlReaderSettings]::new()
+    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $settings.MaxCharactersInDocument = 16777216
+    $reader = [Xml.XmlReader]::Create($JunitPath, $settings)
+    $document = [Xml.XmlDocument]::new()
+    $document.XmlResolver = $null
+    $document.Load($reader)
+    $root = $document.DocumentElement
+    if ($null -eq $root -or $root.get_Name() -cne 'testsuites') { throw 'assessment.junitInvalid' }
+    $junit = [ordered]@{}
+    foreach ($name in 'tests','errors','failures','disabled') {
+      $n = 0
+      if (-not $root.HasAttribute($name) -or $root.GetAttribute($name) -cnotmatch '^(0|[1-9][0-9]*)\z' -or
+          -not [int]::TryParse($root.GetAttribute($name), [ref]$n)) { throw 'assessment.junitInvalid' }
+      $junit[$name] = $n
+    }
+  }
+  catch { throw 'assessment.junitInvalid' }
+  finally { if ($null -ne $reader) { $reader.Dispose() } }
+  # Pester 6.2.0 root errors = FailedContainersCount + FailedBlocksCount.
+  # Maester can reclassify Pester failures/skips as Investigate, so do not equate
+  # every Pester failure with a policy finding or reject expected exclusions.
+  if ($junit.errors -ne 0) { throw 'assessment.junitErrors' }
+  if ($junit.tests -ne $counts.TotalCount -or
+      $junit.failures -lt $counts.FailedCount -or $junit.failures -gt ($counts.FailedCount + $counts.InvestigateCount) -or
+      $junit.disabled -lt ($counts.SkippedCount + $counts.NotRunCount) -or
+      $junit.disabled -gt ($counts.SkippedCount + $counts.NotRunCount + $counts.InvestigateCount) -or
+      (($junit.failures - $counts.FailedCount) + ($junit.disabled - $counts.SkippedCount - $counts.NotRunCount)) -gt $counts.InvestigateCount -or
+      ($junit.failures + $junit.disabled) -gt $junit.tests) { throw 'assessment.junitCountMismatch' }
+  if ([string]::IsNullOrWhiteSpace($result.OutputFiles.OutputHtmlFile) -or [IO.Path]::GetFullPath($result.OutputFiles.OutputHtmlFile) -cne [IO.Path]::GetFullPath($ReportPath)) { throw 'assessment.reportMismatch' }
+  if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf) -or (Get-Item -LiteralPath $ReportPath).Length -le 0) { throw 'assessment.reportMissing' }
+  [ordered]@{
+    Outcome = 'Completed'; Counts = $counts; CoreCases = $core
+    JunitErrors = $junit.errors; JunitTests = $junit.tests
+    ReportSha256 = (Get-FileHash -LiteralPath $ReportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    JunitSha256 = (Get-FileHash -LiteralPath $JunitPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+}
+
+# END shared pure assessment health contract.
+
+if ($ValidationJobId -and $ValidationJobId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z') {
+  throw 'assessment.validationCorrelationInvalid'
+}
+$assessmentStartedAt = [datetimeoffset]::UtcNow
+$assessmentModules = [ordered]@{}
+foreach ($module in $defaultModuleReceipts) { $assessmentModules[$module.Name] = $module.Version }
+
 Connect-AzAccount -Identity | Out-Null
 Connect-MgGraph -Identity -NoWelcome | Out-Null
 
@@ -272,7 +403,8 @@ catch {
 $moera = $null
 if ($includeExchange) {
   Write-Output 'IncludeExchange enabled. Attempting Exchange Online connection using managed identity.'
-  Import-LockedRuntimeModule -Name 'ExchangeOnlineManagement' -PackageLock $runtimePackages -DestinationRoot $verifiedModuleRoot
+  $module = Import-LockedRuntimeModule -Name 'ExchangeOnlineManagement' -PackageLock $runtimePackages -DestinationRoot $verifiedModuleRoot -PassThru
+  $assessmentModules[$module.Name] = $module.Version.ToString()
   try {
 
     # Resolve tenant initial domain (MOERA) for Organization parameter
@@ -350,7 +482,8 @@ if ($includeExchange) {
 }
 
 if ($includeTeams) {
-  Import-LockedRuntimeModule -Name 'MicrosoftTeams' -PackageLock $runtimePackages -DestinationRoot $verifiedModuleRoot
+  $module = Import-LockedRuntimeModule -Name 'MicrosoftTeams' -PackageLock $runtimePackages -DestinationRoot $verifiedModuleRoot -PassThru
+  $assessmentModules[$module.Name] = $module.Version.ToString()
   Write-Output 'IncludeTeams enabled. Attempting Microsoft Teams connection using managed identity.'
 
   # Retry Teams connection with backoff to handle Entra directory role replication delays.
@@ -434,6 +567,10 @@ if (-not $MailRecipient) {
   }
 }
 
+if ($RequireNoMail -and -not [string]::IsNullOrWhiteSpace($MailRecipient)) {
+  throw 'assessment.mailMustBeDisabled'
+}
+
 $tempRoot = Join-Path -Path $env:TEMP -ChildPath ("maester-{0}-{1}" -f (Get-Date -Format 'yyyyMMddHHmmss'), [guid]::NewGuid().ToString('N'))
 New-Item -Path $tempRoot -ItemType Directory -Force | Out-Null
 
@@ -467,15 +604,19 @@ if (-not $testsPath) {
   throw "Could not locate Maester test files under module path '$moduleRoot'."
 }
 
-Write-Output "Using Maester test path: $testsPath"
+Write-Output 'Using verified Maester tests.'
 
-Write-Output "Running Invoke-Maester from test path '$testsPath'"
+Write-Output "Running Invoke-Maester assessment."
+$outputHtmlPath = Join-Path $tempRoot 'assessment.html'
+$junitPath = Join-Path $tempRoot 'pester-junit.xml'
 
 $pesterConfig = [PesterConfiguration]@{
   Run = @{
     # Drift is not an enabled host feature; exclude it before discovery.
     ExcludePath = @((Join-Path $testsPath 'Maester/Drift/MT1060Drift.tests.ps1'))
   }
+  TestResult = @{ Enabled = $true; OutputFormat = 'JUnitXml'; OutputPath = $junitPath; OutputEncoding = 'UTF8' }
+  Output = @{ Verbosity = 'None' }
   TestRegistry = @{
     Enabled = $false
   }
@@ -484,24 +625,29 @@ $pesterConfig = [PesterConfiguration]@{
 $maesterInvokeParameters = @{
   Path                = $testsPath
   OutputFolder        = $tempRoot
+  OutputFolderFileName = 'assessment'
+  PassThru            = $true
   NonInteractive      = $true
+  DisableTelemetry    = $true
+  SkipVersionCheck    = $true
   PesterConfiguration = $pesterConfig
 }
 
 if (-not [string]::IsNullOrWhiteSpace($MailRecipient)) {
   $maesterInvokeParameters['MailRecipient'] = $MailRecipient
   $maesterInvokeParameters['MailUserId'] = $MailRecipient
-  Write-Output "Email notifications enabled for recipient: $MailRecipient"
+  Write-Output 'Upstream inline email is configured; delivery is unverified.'
 }
 
 $previousDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
 try {
   [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', [System.Management.Automation.Language.NullString]::Value, 'Process')
   $ErrorActionPreference = 'Continue'
-  Invoke-Maester @maesterInvokeParameters
+  $invocationErrors = @()
+  $maesterOutput = @(Invoke-Maester @maesterInvokeParameters -ErrorVariable invocationErrors 2>$null 3>$null 4>$null 5>$null 6>$null)
 }
 catch {
-  throw "Invoke-Maester failed: $($_.Exception.Message)"
+  throw 'assessment.invokeFailed'
 }
 finally {
   $ErrorActionPreference = 'Stop'
@@ -512,18 +658,13 @@ finally {
   }
   [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', $restoreDriftRoot, 'Process')
 }
-Write-Output 'Invoke-Maester execution completed.'
-
-$generatedHtml = Get-ChildItem -Path $tempRoot -Recurse -Filter '*.html' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($generatedHtml -and $generatedHtml.Length -gt 0) {
-  $outputHtmlPath = $generatedHtml.FullName
-  Write-Output "Using generated HTML report: $outputHtmlPath"
+if ($invocationErrors.Count -gt 0) { throw 'assessment.invocationErrors' }
+$assessmentEvidence = Get-MaesterAssessmentEvidence -Output $maesterOutput -JunitPath $junitPath -TestsPath $testsPath -ReportPath $outputHtmlPath
+Write-Output 'Maester assessment health verified; policy findings may remain.'
+$publication = [ordered]@{
+  Archive = 'Disabled'; Latest = 'Disabled'; WebApp = 'Disabled'
+  Mail = $(if ([string]::IsNullOrWhiteSpace($MailRecipient)) { 'Disabled' } else { 'UpstreamUnverified' })
 }
-else {
-  throw 'Invoke-Maester did not generate a nonempty HTML report.'
-}
-
-Write-Output "Maester run completed. Report generated successfully."
 
 # ──────────────────────────────────────────────
 # Upload results to storage
@@ -538,18 +679,21 @@ if (-not [string]::IsNullOrWhiteSpace($StorageAccountName)) {
   try {
     Compress-GzipFile -InputPath $outputHtmlPath -OutputPath $compressedArchivePath
     Set-BlobContent -AccountName $StorageAccountName -Container $ExportContainer -BlobName $datedArchiveBlob -SourcePath $compressedArchivePath -StorageToken $storageToken -ContentType 'application/gzip' -AccessTier 'Cool' -ContentEncoding 'gzip'
-    Write-Output "Uploaded archived report (gzip): $datedArchiveBlob"
+    $publication.Archive = 'Published'
+    Write-Output 'Uploaded archived report.'
   }
   catch {
-    Write-Warning "Archive upload failed: $($_.Exception.Message)"
+    $publication.Archive = 'Failed'
+    Write-Warning 'assessment.archiveUploadFailed'
   }
 
   try {
     Set-BlobContent -AccountName $StorageAccountName -Container $DashboardContainer -BlobName 'latest.html' -SourcePath $outputHtmlPath -StorageToken $storageToken -ContentType 'text/html' -AccessTier 'Cool'
-    Write-Output "Uploaded latest report pointer: latest.html"
+    $publication.Latest = 'Published'
+    Write-Output 'Uploaded latest report pointer: latest.html'
   }
   catch {
-    throw "Latest report upload failed: $($_.Exception.Message)"
+    throw 'assessment.latestUploadFailed'
   }
 }
 
@@ -558,10 +702,28 @@ if (-not [string]::IsNullOrWhiteSpace($StorageAccountName)) {
 # ──────────────────────────────────────────────
 
 if (-not [string]::IsNullOrWhiteSpace($WebAppName) -and -not [string]::IsNullOrWhiteSpace($WebAppResourceGroupName)) {
-  Publish-WebAppContent -AppName $WebAppName -AppResourceGroupName $WebAppResourceGroupName -SourcePath $outputHtmlPath
+  try { Publish-WebAppContent -AppName $WebAppName -AppResourceGroupName $WebAppResourceGroupName -SourcePath $outputHtmlPath | Out-Null }
+  catch { throw 'assessment.webAppUploadFailed' }
+  $publication.WebApp = 'Published'
 }
 elseif (-not [string]::IsNullOrWhiteSpace($WebAppName)) {
-  Write-Warning "WebAppName is set to '$WebAppName' but WebAppResourceGroupName is missing. Skipping Web App content publish."
+  $publication.WebApp = 'IncompleteConfiguration'
+  Write-Warning 'assessment.webAppConfigurationIncomplete'
 }
 
 Write-Output "Runbook finished at $(Get-Date -Format 'u')"
+
+# A bounded allowlist only: never emit test records, diagnostics, tenant data or tokens.
+# RequestedJobId is caller correlation, not a claim about host-private metadata.
+$receipt = [ordered]@{
+  SchemaVersion = 1; Kind = 'MaesterAutomationAssessment'; RequestedJobId = $ValidationJobId
+  StartedAt = $assessmentStartedAt.ToString('o'); CompletedAt = [datetimeoffset]::UtcNow.ToString('o')
+  Runtime = [ordered]@{
+    PowerShell = $PSVersionTable.PSVersion.ToString(); DotNet = [Environment]::Version.ToString()
+    Edition = $PSVersionTable.PSEdition
+    Modules = $assessmentModules
+  }
+  Assessment = $assessmentEvidence
+  Publication = $publication
+}
+Write-Output ('MAESTER_ASSESSMENT_RECEIPT_V1:' + ($receipt | ConvertTo-Json -Depth 8 -Compress))

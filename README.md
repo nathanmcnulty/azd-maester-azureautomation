@@ -102,8 +102,9 @@ Defaults:
 
 ## Operations
 
-- Runbook job validation after provision (starts an Automation job; review the Maester report for test outcomes):
+- Runbook job validation after provision (starts an Automation job and requires current-job assessment/source/report evidence; policy findings may remain):
   `./scripts/Invoke-RunbookValidation.ps1 -SubscriptionId <subId> -ResourceGroupName <resourceGroup> -AutomationAccountName <automationAccount> -TenantId <tenantId>`
+  Use `-RequireNoMail` for explicit no-mail qualification. Configured upstream mail remains unverified in ordinary runs. See [assessment evidence](docs/assessment-evidence.md) for receipt/source binding, optional import expectations, and the separate native acceptance gate.
 - Remove environment + Azure resources (includes predown cleanup):
   `azd down -e <env> --force --purge`
 - Optionally remove local azd env:

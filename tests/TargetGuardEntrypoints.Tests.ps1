@@ -3,17 +3,19 @@
 # neither Get-AzCliSubscriptionContext nor Get-AzCliAccessToken is mocked.
 BeforeAll {
   $script:guardRepo = Split-Path -Parent $PSScriptRoot
+  . (Join-Path $PSScriptRoot 'fixtures/AssessmentEvidence.ps1')
   $script:guardSub = '11111111-1111-4111-8111-111111111111'
   $script:guardTenant = '22222222-2222-4222-8222-222222222222'
   $script:guardOther = '99999999-9999-4999-8999-999999999999'
   function Invoke-GuardEntrypoint {
-    param([string]$Name, [switch]$WithoutTenant, [switch]$RuntimeValidationOnly, [switch]$AllowRuntimeValidationPreview)
+    param([string]$Name, [switch]$WithoutTenant, [switch]$RuntimeValidationOnly, [switch]$AllowRuntimeValidationPreview, [switch]$RequireNoMail, [switch]$ExpectExchangeImport, [switch]$ExpectTeamsImport, [switch]$ExpectWebApp)
     if ($Name -eq 'Run-AzdPreUp.ps1') { & (Join-Path $script:guardRepo "scripts/$Name"); return }
     $parameters = @{ SubscriptionId = $script:guardSub }
     if (-not $WithoutTenant) { $parameters.TenantId = $script:guardTenant }
     if ($Name -ne 'Run-AzdPreProvision.ps1') { $parameters.ResourceGroupName = 'rg-guard' }
     if ($Name -eq 'Invoke-RunbookValidation.ps1') {
       $parameters.AutomationAccountName = 'aa-guard'; $parameters.PassThru = $true
+      foreach ($flag in 'RequireNoMail','ExpectExchangeImport','ExpectTeamsImport','ExpectWebApp') { if ($PSBoundParameters.ContainsKey($flag)) { $parameters[$flag] = $PSBoundParameters[$flag] } }
       if ($PSBoundParameters.ContainsKey('AllowRuntimeValidationPreview')) { $parameters.AllowRuntimeValidationPreview = $AllowRuntimeValidationPreview }
       if ($PSBoundParameters.ContainsKey('RuntimeValidationOnly')) { $parameters.RuntimeValidationOnly = $RuntimeValidationOnly }
     } elseif ($Name -ne 'Run-AzdPreProvision.ps1') { $parameters.EnvironmentName = 'guard' }
@@ -52,7 +54,9 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
       Values = @{ AZURE_ENV_NAME = 'guard'; AZURE_SUBSCRIPTION_ID = $script:guardSub; AZURE_TENANT_ID = $script:guardTenant; AZURE_RESOURCE_GROUP = 'rg-guard'; AZURE_LOCATION = 'westus2' }
       Cli = [Collections.Generic.List[string]]::new(); Writes = [Collections.Generic.List[string]]::new()
       Headers = [Collections.Generic.List[string]]::new(); Reads = [Collections.Generic.List[string]]::new(); Connects = [Collections.Generic.List[object]]::new()
-      JobBodies = [Collections.Generic.List[string]]::new(); JobStatus = 'Completed'; JobException = ''; Roles = 0; MetadataFailure = $false; TokenFailure = $false; AllowValidation = $false; AllowGroupCreate = $false; AllowSetup = $false; GraphGrants = 0; ExoTokenFault = ''; ServicePrincipals = 0
+      ReceiptTemplate = New-TestAutomationReceipt; RuntimeTemplate = New-TestRuntimeReceipt
+      RunbookContent = Get-Content (Join-Path $script:guardRepo 'scripts/Invoke-MaesterAutomationRunbook.ps1') -Raw
+      EvidenceFault = ''; JobBodies = [Collections.Generic.List[string]]::new(); JobStatus = 'Completed'; JobException = ''; Roles = 0; MetadataFailure = $false; TokenFailure = $false; AllowValidation = $false; AllowGroupCreate = $false; AllowSetup = $false; GraphGrants = 0; ExoTokenFault = ''; ServicePrincipals = 0
     }
     function global:az {
       $f = $global:targetGuard
@@ -120,7 +124,25 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
         if ($path -match '/runbooks/maester-runbook$') { return [pscustomobject]@{ properties = @{ state = 'Published' } } }
         if ($path -eq "https://management.azure.com$($f.Job.id)") { return $f.Job }
       }
-      if ($f.AllowValidation -and $Uri -match '/jobs/[^/]+/streams\?') { return [pscustomobject]@{ value = @() } }
+      if ($f.AllowValidation -and $Uri -match '/jobs/([^/]+)/output\?') {
+        $jobId = $Matches[1]
+        if ($f.EvidenceFault -eq 'unavailable') { throw 'PRIVATE_OUTPUT_FAILURE' }
+        if ($f.EvidenceFault -eq 'missing') { return 'Completed but no health receipt' }
+        $request = $f.JobBodies[0] | ConvertFrom-Json -AsHashtable
+        if ($request.properties.parameters['RuntimeValidationOnly'] -eq 'true') { return ($f.RuntimeTemplate | ConvertTo-Json -Depth 8 -Compress) }
+        $r = $f.ReceiptTemplate
+        $r.RequestedJobId = $jobId
+        if ($f.EvidenceFault -eq 'stale-job') { $r.RequestedJobId = '00000000-0000-0000-0000-000000000000' }
+        if ($f.EvidenceFault -eq 'errors') { $r.Assessment.Counts.ErrorCount = 23 }
+        if ($f.EvidenceFault -eq 'mail') { $r.Publication.Mail = 'UpstreamUnverified' }
+        $output = 'MAESTER_ASSESSMENT_RECEIPT_V1:' + ($r | ConvertTo-Json -Depth 8 -Compress)
+        if ($f.EvidenceFault -eq 'duplicate') { $output += "`n$output" }
+        return $output
+      }
+      if ($f.AllowValidation -and $Uri -match '/jobs/[^/]+/runbookContent\?') {
+        if ($f.EvidenceFault -eq 'source') { return '# another source snapshot' }
+        return $f.RunbookContent
+      }
       if ($f.AllowValidation -and $Uri -match '/jobs/[^/]+\?') { return [pscustomobject]@{ properties = @{ status = $f.JobStatus; exception = $f.JobException } } }
       throw "Offline read tripwire: $Method $Uri"
     }
@@ -217,7 +239,10 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
       $job.properties.parameters.RuntimeValidationOnly | Should -BeExactly 'true'
       ($job.properties.parameters.RuntimeValidationOnly | ConvertFrom-Json) | Should -BeOfType ([bool])
       ($job.properties.parameters.RuntimeValidationOnly | ConvertFrom-Json) | Should -BeTrue
-    } else { $job.properties.parameters.Count | Should -Be 0 }
+    } else {
+      $job.properties.parameters.Count | Should -Be 1
+      ($job.properties.parameters.ValidationJobId | ConvertFrom-Json) | Should -Match '^[0-9a-f-]{36}$'
+    }
     $f.Writes[0] | Should -Match "^PUT https://management.azure.com/subscriptions/$script:guardSub/resourceGroups/rg-guard/providers/Microsoft.Automation/automationAccounts/aa-guard/jobs/"
     ($f.Cli -join '|') | Should -Match "--subscription $script:guardSub"
     ($f.Cli -join '|') | Should -Not -Match 'account set|login'
@@ -253,7 +278,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
     $f = $global:targetGuard; $f.AllowValidation = $true
     $f.JobStatus = 'Failed'; $f.JobException = 'locked import failed'
     { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly } |
-      Should -Throw '*Final status: Failed. Exception: locked import failed*'
+      Should -Throw '*Final status: Failed'
     $f.JobBodies.Count | Should -Be 1
   }
 
@@ -397,4 +422,36 @@ Export-ModuleMember -Function *
     $f.Writes.Count | Should -Be 0
     ($f.Cli -join '|') | Should -Not -Match 'login|account set'
   }
+  It 'rejects Completed with <Fault> through the actual validation helper' -ForEach @(
+    @{ Fault='missing' }, @{ Fault='duplicate' }, @{ Fault='stale-job' }, @{ Fault='errors' }, @{ Fault='source' }, @{ Fault='unavailable' }
+  ) {
+    $f = $global:targetGuard; $f.AllowValidation = $true; $f.EvidenceFault = $Fault
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' } | Should -Throw '*validation.*'
+    $f.JobBodies.Count | Should -Be 1
+    ($f.Reads -join '|') | Should -Not -Match '/streams|/runbooks/.+/content'
+  }
+  It 'propagates explicit no-mail qualification and binds both exact job read endpoints' {
+    $f = $global:targetGuard; $f.AllowValidation = $true
+    $r = Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RequireNoMail
+    $r.ValidationScope | Should -BeExactly 'NoMailAssessmentHealthAndPublication'
+    $r.Evidence.MailDeliveryVerified | Should -BeFalse
+    $r.Evidence.WorkloadCoverageVerified | Should -BeFalse
+    $request = $f.JobBodies[0] | ConvertFrom-Json -AsHashtable
+    $request.properties.parameters.RequireNoMail | Should -BeExactly 'true'
+    ($request.properties.parameters.ValidationJobId | ConvertFrom-Json) | Should -BeExactly $r.JobId
+    @($f.Reads | Where-Object { $_ -match "/jobs/$($r.JobId)/(output|runbookContent)\?api-version=2023-11-01$" }).Count | Should -Be 2
+  }
+  It 'rejects upstream-mail evidence in explicit no-mail qualification' {
+    $f = $global:targetGuard; $f.AllowValidation = $true; $f.EvidenceFault = 'mail'
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RequireNoMail } | Should -Throw '*jobEvidenceInvalidOrMismatched*'
+  }
+  It 'rejects import-only combined with assessment expectation <Flag> before any work' -ForEach @(
+    @{ Flag='RequireNoMail' }, @{ Flag='ExpectWebApp' }, @{ Flag='ExpectExchangeImport' }, @{ Flag='ExpectTeamsImport' }
+  ) {
+    $flags = @{ $Flag = $true }
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly @flags } | Should -Throw '*RuntimeValidationOnly cannot include*'
+    Assert-GuardNoWrites
+    $global:targetGuard.Cli.Count | Should -Be 0
+  }
+
 }
