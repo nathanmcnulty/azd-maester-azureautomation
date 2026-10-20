@@ -567,9 +567,14 @@ function Get-MaesterCleanupTarget {
       if (Get-MaesterCleanupField $expected 'repositoryName') { Assert-MaesterCleanupEqual (Get-MaesterCleanupField $value 'name') $expected.repositoryName 'repository name' -CaseSensitive }
       Assert-MaesterCleanupEqual (Get-MaesterCleanupField (Get-MaesterCleanupField $value 'project') 'id') $expected.projectId 'repository project'
       $refs=Assert-MaesterCleanupCollection (Invoke-MaesterCleanupAdoRequest $binding GET "/$($expected.projectId)/_apis/git/repositories/$($ids.repositoryId)/refs?api-version=7.1") 'repository refs'
-      $publications=@($Journal.records | Where-Object { $_.kind -eq 'AdoRepositoryPublication' -and $_.coveredByOperationId -eq $Record.operationId -and $_.state -ne 'deleted' })
+      $publications=@($Journal.records | Where-Object { $_.kind -eq 'AdoRepositoryPublication' -and $_.coveredByOperationId -eq $Record.operationId })
+      # Old publication commits remain immutable receipts. Only each complete
+      # chain's terminal publication can authorize the current branch tip. The
+      # canonical journal has already rejected missing, cross-target or forked links.
+      $supersededIds=@($publications | ForEach-Object { Get-MaesterCleanupField $_ 'supersedesOperationId' } | Where-Object { $_ })
+      $terminalPublications=@($publications | Where-Object { $_.state -cne 'deleted' -and $_.operationId -cnotin $supersededIds })
       foreach ($ref in $refs) {
-        $matchingPublications=@($publications | Where-Object { $_.expected.branch -ceq (Get-MaesterCleanupField $ref 'name') -and $_.after.commitId -ceq (Get-MaesterCleanupField $ref 'objectId') })
+        $matchingPublications=@($terminalPublications | Where-Object { $_.expected.branch -ceq (Get-MaesterCleanupField $ref 'name') -and $_.after.commitId -ceq (Get-MaesterCleanupField $ref 'objectId') })
         if ($matchingPublications.Count -ne 1) { throw 'Repository has an unrecorded or changed branch/tag; preserving user work.' }
       }
       $repoResourceId="$($expected.projectId).$($ids.repositoryId)"
@@ -762,8 +767,9 @@ function Invoke-MaesterOwnedCleanupPostDown {
   } catch {
     if ($azureAbsent) {
       $literalRoot=$ProjectRoot.Replace("'", "''")
-      $retry="Invoke-MaesterOwnedCleanupPostDown -ProjectRoot '$literalRoot' -Binding (Resolve-MaesterCleanupBinding -ProjectRoot '$literalRoot' -EnvironmentName '$($Binding.environmentName)' -SolutionName '$($Binding.solutionName)' -TenantId '$($Binding.tenantId)' -SubscriptionId '$($Binding.subscriptionId)') -InteractiveConsent"
-      throw "Azure has been removed; external cleanup is incomplete. The ownership journal is retained. Resolve the blocker and review a fresh plan before retrying: $retry. $($_.Exception.Message)"
+      $entrypoint=(Join-Path $PSScriptRoot 'Invoke-MaesterDown.ps1').Replace("'", "''")
+      $retry="& '$entrypoint' -Phase PostDown -ProjectRoot '$literalRoot' -EnvironmentName '$($Binding.environmentName)' -SolutionName '$($Binding.solutionName)' -TenantId '$($Binding.tenantId)' -SubscriptionId '$($Binding.subscriptionId)' -InteractiveConsent"
+      throw "Azure has been removed; external cleanup is incomplete. The ownership journal is retained. Resolve the blocker, then use this entrypoint in an interactive terminal to select fresh normal-browser sign-in if needed and review a fresh cleanup plan. A parent Process session is not transferred: $retry. $($_.Exception.Message)"
     }
     throw
   } finally { if ($null -ne $session) { $session.Dispose() } }

@@ -134,17 +134,21 @@ Describe 'Actual managed azd down wrappers (offline)' {
     Remove-Variable ManagedDownState -Scope Global -ErrorAction SilentlyContinue
   }
 
-  It 'previews exact owned locks through the real wrapper without any unlock or external authentication' {
+  It 'keeps an interactive plan-only preview read-only through the real wrapper' {
     Register-MaesterExternalSetupStarted @infraArgs | Out-Null; Add-HostOwnedRole
-    $result=Invoke-HostDown PreDown @{PlanOnly=$true}
+    $result=Invoke-HostDown PreDown @{PlanOnly=$true;InteractiveConsent=$true}
     $result.SafeToDelete | Should -BeFalse
     $global:ManagedDownState.ArmDeletes.Count | Should -Be 0
     $global:ManagedDownState.AuthChecks | Should -Be 0
   }
-  It 'rejects omitted, declined and stale lock approval without deleting locks or authorization' {
+  It 'rejects omitted, unavailable interactive and stale lock approval without deleting locks or authorization' {
     Register-MaesterExternalSetupStarted @infraArgs | Out-Null; Add-HostOwnedRole
     {Invoke-HostDown PreDown} | Should -Throw '*approval*'
-    {Invoke-HostDown PreDown @{InteractiveConsent=$true}} | Should -Throw '*not approved*'
+    $savedCi=[Environment]::GetEnvironmentVariable('CI')
+    try {
+      [Environment]::SetEnvironmentVariable('CI','true')
+      {Invoke-HostDown PreDown @{InteractiveConsent=$true}} | Should -Throw '*this process cannot prompt*Down stopped before changing owned locks or Azure resources*'
+    } finally { [Environment]::SetEnvironmentVariable('CI',$savedCi) }
     {Invoke-HostDown PreDown @{ApprovedUnlockPlanHash=('0'*64)}} | Should -Throw '*hash*'
     $global:ManagedDownState.ArmDeletes.Count | Should -Be 0
     $global:ManagedDownState.GraphDeletes.Count | Should -Be 0

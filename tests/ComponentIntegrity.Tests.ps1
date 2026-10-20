@@ -9,9 +9,9 @@ Describe 'Vendored component and permission evidence integrity' {
   It 'pins the reviewed consent flow and retained target guards to an immutable canonical revision' {
     $hooks = @($lock.components | Where-Object id -eq 'maester-azd-hooks')
     $hooks.Count | Should -Be 1
-    $hooks[0].version | Should -BeExactly '3.0.1'
+    $hooks[0].version | Should -BeExactly '3.1.1'
     $hooks[0].sourceRepository | Should -BeExactly 'https://github.com/nathanmcnulty/azd-reference'
-    $hooks[0].sourceRevision | Should -BeExactly 'b9019c809bcffd2747fdb2f47e455ee9edfe7564'
+    $hooks[0].sourceRevision | Should -BeExactly 'def75ea1d03636ebae234c5e0b9c0fda25f0f9bf'
     $hooks[0].files.Count | Should -Be 13
     $coordinator = @($lock.components | Where-Object id -eq 'graph-delegated-authentication')
     $coordinator.Count | Should -Be 1

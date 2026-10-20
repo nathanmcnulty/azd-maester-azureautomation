@@ -869,7 +869,7 @@
       "evidence": [
         {
           "path": "scripts/vendor/Azd.MaesterHooks/Maester-PreDownCleanup.psm1",
-          "sha256": "6bf4a58d274be735f3b3905d7c83e0edabbfc514f30b01bf3138b1e94b562bf9"
+          "sha256": "aff7487ce9733a83aafe92c1d1cd5687234e2b92cd0df98303927b51ab3ed979"
         },
         {
           "path": "scripts/Run-AzdPostDown.ps1",
@@ -891,7 +891,7 @@
       "evidence": [
         {
           "path": "scripts/vendor/Azd.MaesterHooks/Maester-PreDownCleanup.psm1",
-          "sha256": "6bf4a58d274be735f3b3905d7c83e0edabbfc514f30b01bf3138b1e94b562bf9"
+          "sha256": "aff7487ce9733a83aafe92c1d1cd5687234e2b92cd0df98303927b51ab3ed979"
         },
         {
           "path": "scripts/Run-AzdPostDown.ps1",
@@ -913,7 +913,7 @@
       "evidence": [
         {
           "path": "scripts/vendor/Azd.MaesterHooks/Maester-PreDownCleanup.psm1",
-          "sha256": "6bf4a58d274be735f3b3905d7c83e0edabbfc514f30b01bf3138b1e94b562bf9"
+          "sha256": "aff7487ce9733a83aafe92c1d1cd5687234e2b92cd0df98303927b51ab3ed979"
         },
         {
           "path": "scripts/Run-AzdPostDown.ps1",
@@ -935,7 +935,7 @@
       "evidence": [
         {
           "path": "scripts/vendor/Azd.MaesterHooks/Maester-PreDownCleanup.psm1",
-          "sha256": "6bf4a58d274be735f3b3905d7c83e0edabbfc514f30b01bf3138b1e94b562bf9"
+          "sha256": "aff7487ce9733a83aafe92c1d1cd5687234e2b92cd0df98303927b51ab3ed979"
         },
         {
           "path": "scripts/Run-AzdPostDown.ps1",
@@ -957,7 +957,7 @@
       "evidence": [
         {
           "path": "scripts/vendor/Azd.MaesterHooks/Maester-PreDownCleanup.psm1",
-          "sha256": "6bf4a58d274be735f3b3905d7c83e0edabbfc514f30b01bf3138b1e94b562bf9"
+          "sha256": "aff7487ce9733a83aafe92c1d1cd5687234e2b92cd0df98303927b51ab3ed979"
         },
         {
           "path": "scripts/Run-AzdPostDown.ps1",
@@ -979,7 +979,7 @@
       "evidence": [
         {
           "path": "scripts/vendor/Azd.MaesterHooks/Maester-PreDownCleanup.psm1",
-          "sha256": "6bf4a58d274be735f3b3905d7c83e0edabbfc514f30b01bf3138b1e94b562bf9"
+          "sha256": "aff7487ce9733a83aafe92c1d1cd5687234e2b92cd0df98303927b51ab3ed979"
         },
         {
           "path": "scripts/Run-AzdPostDown.ps1",
