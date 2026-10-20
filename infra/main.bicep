@@ -545,3 +545,54 @@ output STORAGE_ACCOUNT_NAME string = storageTarget.name
 output WEB_APP_NAME string = includeWebApp ? webAppName : ''
 output WEB_APP_ENABLED string = includeWebApp ? 'true' : 'false'
 output webAppDefaultHostName string = includeWebApp ? (preserveUpgradeAccess ? existingWebApp.properties.defaultHostName : maesterWebApp!.outputs.webAppDefaultHostName) : ''
+
+// Exact declared IDs only. Existing identities and resources are never adopted.
+// Child resources of the report-webapp module are deliberately included; keep
+// these expressions aligned with the reviewed module when its declarations change.
+var maesterDeclaredResourceIds = filter([
+  !preserveUpgradeAccess ? automationAccount!.id : ''
+  !preserveUpgradeAccess ? storageAccount!.id : ''
+  !preserveUpgradeAccess ? blobService!.id : ''
+  !preserveUpgradeAccess ? containerArchive!.id : ''
+  !preserveUpgradeAccess ? containerLatest!.id : ''
+  !preserveUpgradeAccess ? storageManagementPolicy!.id : ''
+  !preserveUpgradeAccess ? automationStorageBlobContributor!.id : ''
+  enableResourceLocks && !preserveUpgradeAccess ? storageDeleteLock!.id : ''
+  enableResourceLocks && !preserveUpgradeAccess ? automationDeleteLock!.id : ''
+  runtime76.id
+  runtimePackageAzAccounts.id
+  runtimePackageMaester.id
+  runtimePackagePester.id
+  runtimePackageNuGet.id
+  runtimePackagePackageManagement.id
+  runtimePackagePowerShellGet.id
+  runtimePackageGraphAuth.id
+  includeExchange ? runtimePackageExchangeOnlineManagement!.id : ''
+  includeTeams ? runtimePackageMicrosoftTeams!.id : ''
+  !existingAutomationResources && !preserveUpgradeAccess ? runbook!.id : ''
+  !preserveUpgradeAccess ? variableStorageAccountName!.id : ''
+  !preserveUpgradeAccess ? variableMailRecipient!.id : ''
+  !preserveUpgradeAccess ? variableIncludeExchange!.id : ''
+  !preserveUpgradeAccess ? variableIncludeTeams!.id : ''
+  !preserveUpgradeAccess ? variableIncludeAzure!.id : ''
+  !preserveUpgradeAccess ? variableAzureRbacScopes!.id : ''
+  includeWebApp && !preserveUpgradeAccess ? variableWebAppName!.id : ''
+  includeWebApp && !preserveUpgradeAccess ? variableWebAppResourceGroupName!.id : ''
+  !existingAutomationResources && !preserveUpgradeAccess ? schedule!.id : ''
+  includeWebApp && !preserveUpgradeAccess ? resourceId('Microsoft.Resources/deployments', 'maester-report-webapp') : ''
+  includeWebApp && !preserveUpgradeAccess ? resourceId('Microsoft.Web/serverfarms', appServicePlanName) : ''
+  includeWebApp && !preserveUpgradeAccess ? resourceId('Microsoft.Web/sites', webAppName) : ''
+  includeWebApp && !preserveUpgradeAccess ? resourceId('Microsoft.Web/sites/basicPublishingCredentialsPolicies', webAppName, 'scm') : ''
+  includeWebApp && !preserveUpgradeAccess ? resourceId('Microsoft.Web/sites/basicPublishingCredentialsPolicies', webAppName, 'ftp') : ''
+  includeWebApp && !preserveUpgradeAccess ? extensionResourceId(resourceId('Microsoft.Web/sites', webAppName), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Web/sites', webAppName), automationTarget.id, 'WebsiteContributor')) : ''
+  includeWebApp && !preserveUpgradeAccess && enableResourceLocks ? extensionResourceId(resourceId('Microsoft.Web/sites', webAppName), 'Microsoft.Authorization/locks', 'lock-cannot-delete-webapp') : ''
+], id => !empty(id))
+var maesterDeclaredLockIds = filter([
+  enableResourceLocks && !preserveUpgradeAccess ? storageDeleteLock!.id : ''
+  enableResourceLocks && !preserveUpgradeAccess ? automationDeleteLock!.id : ''
+  includeWebApp && !preserveUpgradeAccess && enableResourceLocks ? extensionResourceId(resourceId('Microsoft.Web/sites', webAppName), 'Microsoft.Authorization/locks', 'lock-cannot-delete-webapp') : ''
+], id => !empty(id))
+
+output MAESTER_OWNED_RESOURCE_IDS string = string(maesterDeclaredResourceIds)
+output MAESTER_OWNED_LOCK_IDS string = string(maesterDeclaredLockIds)
+output MAESTER_INFRASTRUCTURE_OWNERSHIP_ID string = contains(resourceGroup().tags, 'maester-ownership-id') ? resourceGroup().tags['maester-ownership-id'] : ''

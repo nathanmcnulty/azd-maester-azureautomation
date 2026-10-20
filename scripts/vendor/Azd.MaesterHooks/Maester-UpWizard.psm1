@@ -3,6 +3,7 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:WizardEnvironmentName = ''
 
 Import-Module (Join-Path $PSScriptRoot 'Maester-SetupHelpers.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Maester-Helpers.psm1') -Force
@@ -34,7 +35,9 @@ function Set-AzdEnvValueStrict {
     [string]$Value
   )
 
-  & azd env set $Name $Value | Out-Null
+  $setArguments = @('env', 'set', $Name, $Value)
+  if ($script:WizardEnvironmentName) { $setArguments += @('-e', $script:WizardEnvironmentName) }
+  & azd @setArguments | Out-Null
   if ($LASTEXITCODE -ne 0) {
     throw "Failed to persist azd environment value '$Name'."
   }
@@ -68,22 +71,32 @@ function Test-InteractiveWizard {
 function Test-AzdNoPromptInvocation {
   try {
     $currentPid = $PID
+    if (-not $IsWindows) {
+      $processCommand = (Get-Command ps -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    }
     for ($depth = 0; $depth -lt 10; $depth++) {
-      $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid" -ErrorAction Stop
-      if (-not $process) {
-        break
+      if ($IsWindows) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid" -ErrorAction Stop
+        if (-not $process) { break }
+        $name = [string]$process.Name
+        $commandLine = [string]$process.CommandLine
+        $parentPid = [int]$process.ParentProcessId
       }
-
-      $name = [string]$process.Name
-      $commandLine = [string]$process.CommandLine
-
-      if ($name -ieq 'azd.exe' -and
+      else {
+        $process = Get-Process -Id $currentPid -ErrorAction Stop
+        $name = [string]$process.ProcessName
+        $commandLine = (& $processCommand -p $currentPid -o command=) -join ' '
+        if ($LASTEXITCODE -ne 0) { break }
+        $parentText = (& $processCommand -p $currentPid -o ppid=) -join ''
+        if ($LASTEXITCODE -ne 0) { break }
+        $parentPid = [int]$parentText.Trim()
+      }
+      if ($name -in @('azd', 'azd.exe') -and
           -not [string]::IsNullOrWhiteSpace($commandLine) -and
-          $commandLine -match '(^|\s)--no-prompt(\s|$)') {
+          $commandLine -match '(?i)(^|\s)--(?:no-prompt|non-interactive)(?:=(?:true|1|t))?(?=\s|$)') {
         return $true
       }
 
-      $parentPid = [int]$process.ParentProcessId
       if ($parentPid -le 0 -or $parentPid -eq $currentPid) {
         break
       }
@@ -425,22 +438,29 @@ function Invoke-MaesterUpWizard {
     [string]$Location,
 
     [Parameter(Mandatory = $false)]
-    [string]$TenantId
+    [string]$TenantId,
+
+    [string]$EnvironmentName,
+
+    [switch]$UseSavedConfiguration
   )
 
-  $interactiveWizard = Test-InteractiveWizard
-  $envValues = Get-AzdEnvironmentValues
+  $script:WizardEnvironmentName = $EnvironmentName
+  $interactiveWizard = -not $UseSavedConfiguration -and (Test-InteractiveWizard)
+  $envValues = Get-AzdEnvironmentValues -EnvironmentName $EnvironmentName
+  if ($EnvironmentName -and $envValues['AZURE_ENV_NAME'] -cne $EnvironmentName) {
+    throw 'Wizard environment differs from the explicitly selected azd environment.'
+  }
 
-  $environmentName = if (-not [string]::IsNullOrWhiteSpace($env:AZURE_ENV_NAME)) { $env:AZURE_ENV_NAME } else { 'dev' }
+  $environmentName = if ($EnvironmentName) { $EnvironmentName } elseif (-not [string]::IsNullOrWhiteSpace($env:AZURE_ENV_NAME)) { $env:AZURE_ENV_NAME } else { 'dev' }
   $effectiveLocation = Get-LocationOrDefault -Location $Location
-  $normalizedLocation = ($effectiveLocation -replace '\s+', '').ToLower()
 
   $resourceGroupCurrent = Get-AzdEnvironmentValue -Values $envValues -Name 'AZURE_RESOURCE_GROUP'
   $resourceGroupDefault = if (-not [string]::IsNullOrWhiteSpace($resourceGroupCurrent)) {
     $resourceGroupCurrent
   }
   else {
-    "rg-$($environmentName.ToLower())-$normalizedLocation"
+    "rg-$environmentName"
   }
 
   $includeWebAppCurrent = ConvertTo-BoolOrNull (Get-AzdEnvironmentValue -Values $envValues -Name 'INCLUDE_WEB_APP')
@@ -670,11 +690,13 @@ function Invoke-MaesterUpWizard {
     }
   }
 
-  if (-not [string]::IsNullOrWhiteSpace($TenantId)) {
+  # A bound preflight already requires the selected tenant. Do not overwrite
+  # a concurrent selection change that the final target check must detect.
+  if (-not $script:WizardEnvironmentName -and -not [string]::IsNullOrWhiteSpace($TenantId)) {
     Set-AzdEnvValueStrict -Name 'AZURE_TENANT_ID' -Value $TenantId
   }
 
   Write-Host 'azd preprovision wizard settings applied.'
 }
 
-Export-ModuleMember -Function Invoke-MaesterUpWizard
+Export-ModuleMember -Function Invoke-MaesterUpWizard, Test-InteractiveWizard

@@ -24,6 +24,10 @@ else {
     $last = $runner.IndexOf('# END shared pure assessment health contract')
     if ($first -lt 0 -or $last -le $first) { throw 'Production health contract not found.' }
     . ([scriptblock]::Create($runner.Substring($first, $last - $first)))
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($runner, [ref]$tokens, [ref]$errors)
+    $projection = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'New-FailedAssessmentDiagnostic' }, $true)
+    . ([scriptblock]::Create($projection.Extent.Text))
 }
 $configStart = $runner.IndexOf('$pesterConfig = [PesterConfiguration]@{')
 $configEnd = $runner.IndexOf("if (-not", $runner.IndexOf('$maesterInvokeParameters =', $configStart))
@@ -48,7 +52,7 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) "maester-230-compat-$([guid]::NewGu
 $originalDrift = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
 $checks = [Collections.Generic.List[object]]::new()
 try {
-    foreach ($mode in @('policy','runtime-error','setup-error','core-skipped')) {
+    foreach ($mode in @('policy','runtime-error','setup-error','afterall-error','discovery-error','core-skipped')) {
         $global:Maester230FixtureMode = $mode
         $testsPath = Join-Path $temp "$mode/tests"
         $tempRoot = Join-Path $temp "$mode/output"
@@ -75,8 +79,12 @@ Describe 'Release compatibility' {
 }
 '@ | Set-Content (Join-Path $testsPath 'Compatibility.Tests.ps1')
         if ($mode -eq 'setup-error') {
-            "Describe 'Engine failure' { BeforeAll { throw 'synthetic setup failure' }; It 'OFFLINE.SETUP: Unreachable.' { 1 | Should -Be 1 } }" | Set-Content (Join-Path $testsPath 'Engine.Tests.ps1')
+            "Describe 'Engine failure' { BeforeAll { throw [IO.IOException]::new('SYNTHETIC_BEFOREALL_CAUSE') }; It 'OFFLINE.SETUP: Unreachable.' { 1 | Should -Be 1 } }" | Set-Content (Join-Path $testsPath 'Engine.Tests.ps1')
         }
+        if ($mode -eq 'afterall-error') {
+            "Describe 'Engine failure' { AfterAll { throw [IO.IOException]::new('SYNTHETIC_AFTERALL_CAUSE') }; It 'OFFLINE.AFTERALL: Ran.' { 1 | Should -Be 1 } }" | Set-Content (Join-Path $testsPath 'Engine.Tests.ps1')
+        }
+        if ($mode -eq 'discovery-error') { "throw [IO.IOException]::new('SYNTHETIC_DISCOVERY_CAUSE')" | Set-Content (Join-Path $testsPath 'Engine.Tests.ps1') }
         $junitPath = Join-Path $tempRoot 'pester-junit.xml'
         $outputHtmlPath = Join-Path $tempRoot 'assessment.html'
         $EnableApprovedDrift = $false
@@ -98,10 +106,21 @@ Describe 'Release compatibility' {
             if ($counts.TotalCount -ne 5 -or $counts.PassedCount -ne 1 -or $counts.FailedCount -ne 1 -or $counts.SkippedCount -ne 1 -or $counts.NotRunCount -ne 2 -or $counts.ErrorCount -ne 0) { throw 'Unexpected actual 2.3.0 result accounting.' }
             $checks.Add([ordered]@{ Mode = $mode; Outcome = 'ExpectedCompletion'; Counts = $counts })
         } else {
-            $expected = switch ($mode) { 'runtime-error' { 'assessment.unclassifiedFailure' }; 'setup-error' { 'assessment.unclassifiedFailure' }; 'core-skipped' { 'assessment.coreNotExecuted' } }
+            $expected = switch ($mode) { 'runtime-error' { 'assessment.unclassifiedFailure' }; 'setup-error' { 'assessment.unclassifiedFailure' }; 'afterall-error' { 'assessment.junitErrors' }; 'discovery-error' { 'assessment.junitErrors' }; 'core-skipped' { 'assessment.coreNotExecuted' } }
             if ($failure -cne $expected) { throw "Expected $expected for $mode; got '$failure'." }
             if ($mode -eq 'setup-error' -and ([xml](Get-Content $junitPath -Raw)).testsuites.errors -lt 1) { throw 'Expected real Pester engine errors in JUnit.' }
             $checks.Add([ordered]@{ Mode = $mode; Outcome = 'ExpectedRejection'; Gate = $failure })
+        }
+        if (-not $isContainer) {
+            $diagnostic = New-FailedAssessmentDiagnostic -DiagnosticErrors $invocationDiagnosticErrors -InvocationId ('a'*32) -RequestedJobId '' -FailureCode $failure | ConvertFrom-Json
+            if ($mode -in @('setup-error','afterall-error','discovery-error')) {
+                $cause = switch ($mode) { 'setup-error' { 'SYNTHETIC_BEFOREALL_CAUSE' }; 'afterall-error' { 'SYNTHETIC_AFTERALL_CAUSE' }; 'discovery-error' { 'SYNTHETIC_DISCOVERY_CAUSE' } }
+                $engine = @($diagnostic.Entries | Where-Object Message -CEQ $cause)
+                if (-not $engine.Count -or -not ($engine.ScriptStackTrace -join '').Contains('Engine.Tests.ps1')) { throw "Missing real $mode diagnostic cause/stack." }
+                if ($invocationErrors.Count -ne 0) { throw 'Engine diagnostic fixture unexpectedly emitted an error.' }
+                if ($mode -ne 'discovery-error' -and (Get-Content $junitPath -Raw).Contains($cause)) { throw 'Expected JUnit to omit the block cause.' }
+            }
+            if ($mode -eq 'policy' -and $diagnostic.SourceEntryCount -eq 0) { throw 'Expected handled policy diagnostics; they must not drive health admission.' }
         }
     }
     if ($global:Maester230TransportAttempts -ne 0) { throw 'An upstream network/authentication boundary was reached.' }

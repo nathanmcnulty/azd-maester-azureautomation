@@ -36,6 +36,7 @@ Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId
 $location = $env:AZURE_LOCATION
 Invoke-MaesterPreProvision `
   -SolutionName 'automation-account' `
+  -ProjectRoot (Split-Path $PSScriptRoot -Parent) -EnvironmentName $EnvironmentName `
   -SubscriptionId $SubscriptionId `
   -TenantId $TenantId `
   -Location $location
@@ -244,3 +245,5 @@ elseif ($location) {
 else {
   Write-Warning 'AZURE_LOCATION not set. Skipping Automation Account quota check.'
 }
+
+# Shared preflight already validated/captured ownership before these host checks.

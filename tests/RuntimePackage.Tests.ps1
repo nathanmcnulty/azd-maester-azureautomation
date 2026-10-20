@@ -32,8 +32,10 @@ Describe 'Automation runtime package reproducibility' {
     $bicepLines = Get-Content (Join-Path $PSScriptRoot '..\infra\main.bicep')
     @($bicepLines | Where-Object { $_ -match "resource runtimePackageExchangeOnlineManagement.*= if \(includeExchange\)" }).Count | Should -Be 1
     @($bicepLines | Where-Object { $_ -match "resource runtimePackageMicrosoftTeams.*= if \(includeTeams\)" }).Count | Should -Be 1
-    @($bicepLines | Where-Object { $_ -match 'runtimePackageExchangeOnlineManagement' }).Count | Should -Be 2
-    @($bicepLines | Where-Object { $_ -match 'runtimePackageMicrosoftTeams' }).Count | Should -Be 2
+    @($bicepLines | Where-Object { $_ -match '^\s+runtimePackageExchangeOnlineManagement\s*$' }).Count | Should -Be 1
+    @($bicepLines | Where-Object { $_ -match "includeExchange \? runtimePackageExchangeOnlineManagement!\.id : ''" }).Count | Should -Be 1
+    @($bicepLines | Where-Object { $_ -match '^\s+runtimePackageMicrosoftTeams\s*$' }).Count | Should -Be 1
+    @($bicepLines | Where-Object { $_ -match "includeTeams \? runtimePackageMicrosoftTeams!\.id : ''" }).Count | Should -Be 1
   }
 
   It 'never links the pinned seed runbook to a schedule during infrastructure provisioning' {

@@ -72,6 +72,64 @@ recipient address, raw ErrorRecords, private reports, or tokens. Maester's
 assessment diagnostic streams are suppressed from runbook logs. The private
 HTML and JUnit stay separate from the compact receipt.
 
+## Restricted diagnostics for a failed assessment
+
+Invocation or assessment-health failure still fails the job with its original
+`assessment.*` error. Before rethrowing, the runbook makes a best-effort attempt
+to retain only these current-invocation files in the configured existing export
+container:
+
+- `failed/<generated-invocation-guid>/diagnostics.json`
+- `failed/<generated-invocation-guid>/pester-junit.xml`, when the fixed current-run
+  JUnit path is a nonempty regular file of at most 16 MiB (links are rejected)
+
+The generated GUID is independent of caller correlation, so repeated or scheduled
+runs cannot overwrite each other's diagnostics. The JSON includes the validated
+`RequestedJobId` when supplied, the original stable failure code, and a bounded
+sample of upstream error IDs, exception types, messages, and stack text. It never
+serializes complete ErrorRecords, TargetObject, InvocationInfo, exception Data,
+Graph/account context, the full Maester result, HTML, or the global error list.
+
+`Invoke-Maester -ErrorVariable` supplies diagnostic evidence only. It also captures
+handled policy assertions, skips and optional probes during healthy runs, so its
+contents never admit or reject health. ErrorRecord and RuntimeException wrappers
+are normalized to scalar fields and deduplicated. Non-control-flow records are
+prioritized over Pester assertion/skip/inconclusive control flow, solely for the
+private sample. At most 32 entries are written; per-entry limits are 256 characters
+for ID/type, 2,048 for message/exception stack, and 4,096 for script stack. The JSON
+is capped at 256 KiB UTF-8, with clipping, repeats, unsupported inputs and omissions
+reported explicitly. Repeat counts cover retained fingerprints; further repeated
+omitted records can be counted as omissions. The upstream ErrorVariable
+collection itself is not a streaming-memory-bounded API. A bounded sample may omit the eventual root cause.
+
+These files contain sensitive, untrusted upstream error text and test details.
+Messages and stacks are not guaranteed secret-free. Keep them restricted to
+explicitly authorized operators; do not automatically copy them to public
+reports, issues, chat, or ordinary job logs. Retention follows the existing
+archive lifecycle and access policy, with no new container, permission, or public
+access change. Review those policies before an authorized native rerun.
+
+Before diagnostic PUTs, the same managed-identity storage token performs one
+[Get Container Properties HEAD](https://learn.microsoft.com/en-us/rest/api/storageservices/get-container-properties)
+request to the exact configured container. The runbook requires HTTP 200 and an
+absent `x-ms-blob-public-access` header. It rejects malformed account/container
+names, the dashboard container, and `$web`; it does not follow redirects. This is
+a point-in-time anonymous-access check, not proof of network isolation or of
+least-privilege RBAC. Externally reconfigured storage must not be assumed private
+from its name or the template defaults. A public container or failed/denied check
+skips diagnostic uploads. No extra permissions are requested. HEAD and diagnostic
+PUTs have fixed connection/operation timeouts, no redirects and no retries.
+Token acquisition retains the existing SDK behavior; this does not impose an
+overall job-duration bound.
+
+Missing files, extraction/token errors and diagnostic upload failures cannot
+replace the original failure. The job stream receives only fixed status labels,
+the generated correlation ID and relative blob prefix. This path never publishes
+HTML, healthy archive reports, latest pointers, Web App content, or an assessment
+success receipt. Successful assessments do not publish failure diagnostics.
+Configured upstream inline mail may already have occurred before failure; this
+path cannot prevent or retract it. Explicit no-mail qualification remains required.
+
 ## Qualification and mail
 
 Maester sends configured email inside `Invoke-Maester`, before returning its
@@ -121,7 +179,11 @@ variants, Desktop and unsupported .NET combinations are rejected. The legacy
 Offline tests run the complete maintained runbook with fixture packages and
 mocked transport/authentication boundaries, plus the real validation helper and
 its job-output/content reads. Real Pester fixtures exercise assertion, skipped,
-runtime, discovery and setup failures. Parser tests cover adversarial schemas,
+runtime, discovery, BeforeAll and AfterAll failures. The real locked Maester/Pester
+qualification checks that diagnostic-only capture preserves engine causes and
+stacks even when JUnit has only error counts and the emitted error stream is empty.
+Complete-runbook fixtures also cover private-container checks, restricted failure
+artifacts and extraction/token/upload failures without network access. Parser tests cover adversarial schemas,
 source races, current-job binding, freshness and publication failures.
 
 These source tests do not validate the provider's actual output framing,

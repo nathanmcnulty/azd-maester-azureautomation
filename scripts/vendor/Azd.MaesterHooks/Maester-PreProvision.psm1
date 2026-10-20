@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Maester-UpWizard.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Maester-SetupHelpers.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Maester-InfrastructureOwnership.psm1')
 
 function Get-SemanticVersion {
   param([Parameter(Mandatory = $true)][string]$VersionText)
@@ -24,6 +25,10 @@ function Invoke-MaesterPreProvision {
     [ValidateSet('automation-account', 'function-app', 'container-app-job', 'azure-devops')]
     [string]$SolutionName,
 
+    [Parameter(Mandatory)][string]$ProjectRoot,
+    [Parameter(Mandatory)][string]$EnvironmentName,
+    [switch]$Configure,
+
     [Parameter(Mandatory = $false)]
     [string]$SubscriptionId,
 
@@ -40,15 +45,30 @@ function Invoke-MaesterPreProvision {
     [switch]$RequireAdopsModule
   )
 
-  if (-not $SubscriptionId) {
-    $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID
+  # Resolve from the named environment, never ambient azd selection or a cached account.
+  $target = Resolve-MaesterInfrastructureContext -ProjectRoot $ProjectRoot -EnvironmentName $EnvironmentName `
+    -SolutionName $SolutionName -SubscriptionId $SubscriptionId -TenantId $TenantId
+  $SubscriptionId = $target.binding.subscriptionId
+  $TenantId = $target.binding.tenantId
+  if ($Location -and $Location -ine $target.values['AZURE_LOCATION']) {
+    throw 'Explicit location differs from the selected azd environment.'
   }
-  if (-not $TenantId -and $env:AZURE_TENANT_ID) {
-    $TenantId = $env:AZURE_TENANT_ID
-  }
+  $Location = [string]$target.values['AZURE_LOCATION']
+  if ([string]::IsNullOrWhiteSpace($Location)) { $Location = 'eastus2' }
 
-  if (-not $SubscriptionId) {
-    throw 'AZURE_SUBSCRIPTION_ID is required before provision. Run azd env set AZURE_SUBSCRIPTION_ID <subId> or create env with subscription.'
+  # Postprovision is a separate process: a Graph context here is not readiness
+  # evidence. Its existing consent flow must be able to ask for login approval.
+  # The existing Automation preservation mode does not run Graph setup.
+  $preserveAccess = $false
+  if ($SolutionName -eq 'automation-account') {
+    $selected = [string]$target.values['AUTOMATION_UPGRADE_PRESERVE_ACCESS']
+    $ambient = $env:AUTOMATION_UPGRADE_PRESERVE_ACCESS
+    if ($ambient -and $ambient -ine $selected) { throw 'The process AUTOMATION_UPGRADE_PRESERVE_ACCESS differs from the selected azd environment.' }
+    if ($selected -and $selected -notin @('true', 'false')) { throw 'AUTOMATION_UPGRADE_PRESERVE_ACCESS must be true or false.' }
+    $preserveAccess = $selected -eq 'true'
+  }
+  if (-not $preserveAccess -and -not (Test-InteractiveWizard)) {
+    throw 'Postprovision setup requires interactive login approval in its own process. Run the preup preparation interactively before provisioning; no ARM create was attempted by this hook.'
   }
 
   $azdVersionOutput = (& azd version) -join "`n"
@@ -74,20 +94,21 @@ function Invoke-MaesterPreProvision {
     }
   }
 
-  $azAccount = Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId
-  if (-not $TenantId) { $TenantId = $azAccount.tenantId }
+  Push-Location -LiteralPath $target.root
+  try {
+    Invoke-MaesterUpWizard -SolutionName $SolutionName -SubscriptionId $SubscriptionId `
+      -Location $Location -TenantId $TenantId -EnvironmentName $EnvironmentName -UseSavedConfiguration:(-not $Configure -or $preserveAccess)
+  } finally { Pop-Location }
 
-  if ([string]::IsNullOrWhiteSpace($TenantId)) {
-    throw 'AZURE_TENANT_ID could not be resolved during preprovision.'
-  }
-
-  Invoke-MaesterUpWizard `
-    -SolutionName $SolutionName `
-    -SubscriptionId $SubscriptionId `
-    -Location $Location `
-    -TenantId $TenantId
-
-  Write-Host 'Preprovision checks passed: azd version, Azure authentication, and preprovision prerequisites are ready.'
+  $prepared = Resolve-MaesterInfrastructureContext -ProjectRoot $ProjectRoot -EnvironmentName $EnvironmentName `
+    -SolutionName $SolutionName -SubscriptionId $SubscriptionId -TenantId $TenantId -ResourceGroupName $target.resourceGroupName
+  if ($prepared.values['AZURE_LOCATION'] -ine $Location) { throw 'The wizard changed the selected deployment location.' }
+  # Initialize only after all prerequisite checks and wizard validation. Its live
+  # 404 -> durable Pending -> exact PUT 201 -> Created proof is unchanged.
+  Initialize-MaesterInfrastructureOwnership -ProjectRoot $prepared.root -EnvironmentName $EnvironmentName `
+    -SolutionName $SolutionName -SubscriptionId $SubscriptionId -TenantId $TenantId `
+    -ResourceGroupName $prepared.resourceGroupName -RequireExisting:$preserveAccess | Out-Null
+  Write-Host 'Maester selected-target prerequisites and infrastructure ownership preflight passed.'
 }
 
 Export-ModuleMember -Function Invoke-MaesterPreProvision

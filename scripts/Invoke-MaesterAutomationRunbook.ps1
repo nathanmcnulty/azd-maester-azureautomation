@@ -150,13 +150,15 @@ function Set-BlobContent {
     [Parameter(Mandatory = $true)][string]$StorageToken,
     [Parameter(Mandatory = $true)][string]$ContentType,
     [string]$AccessTier = 'Cool',
-    [string]$ContentEncoding
+    [string]$ContentEncoding,
+    [switch]$BoundedRequest
   )
 
   $uri = "https://$AccountName.blob.core.windows.net/$Container/$BlobName"
   $headers = @{
     'Authorization' = "Bearer $StorageToken"
     'x-ms-version' = '2021-12-02'
+    'x-ms-date' = [datetime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture)
     'x-ms-blob-type' = 'BlockBlob'
     'x-ms-access-tier' = $AccessTier
   }
@@ -165,7 +167,137 @@ function Set-BlobContent {
     $headers['x-ms-blob-content-encoding'] = $ContentEncoding
   }
 
-  Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -InFile $SourcePath -ContentType $ContentType | Out-Null
+  $requestOptions = @{}
+  if ($BoundedRequest) {
+    $requestOptions = @{ ConnectionTimeoutSeconds = 10; OperationTimeoutSeconds = 30; MaximumRetryCount = 0; MaximumRedirection = 0 }
+  }
+  Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -InFile $SourcePath -ContentType $ContentType @requestOptions | Out-Null
+}
+
+# Diagnostic-only projection: ErrorVariable also includes handled assertions/skips.
+# No projected value is used to admit assessment health or emitted to job streams.
+function New-FailedAssessmentDiagnostic {
+  param([AllowNull()][object]$DiagnosticErrors, [string]$InvocationId, [string]$RequestedJobId, [string]$FailureCode)
+  $primary = [Collections.Generic.List[object]]::new()
+  $control = [Collections.Generic.List[object]]::new()
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $sourceCount = 0; $repeated = 0; $omitted = 0; $unsupported = 0; $textTruncated = $false
+  foreach ($candidate in $DiagnosticErrors) {
+    $sourceCount++
+    $record = if ($candidate -is [Management.Automation.ErrorRecord]) { $candidate }
+      elseif ($candidate -is [Management.Automation.RuntimeException]) { $candidate.ErrorRecord }
+      else { $null }
+    if ($record -isnot [Management.Automation.ErrorRecord]) { $unsupported++; continue }
+    # Never serialize the record, TargetObject, InvocationInfo, Data or context.
+    $entry = [ordered]@{ ErrorId = ''; ExceptionType = ''; Message = ''; ScriptStackTrace = ''; ExceptionStackTrace = ''; TextTruncated = $false }
+    $values = @($record.FullyQualifiedErrorId, $record.Exception.GetType().FullName, $record.Exception.Message, $record.ScriptStackTrace, $record.Exception.StackTrace)
+    $names = @('ErrorId','ExceptionType','Message','ScriptStackTrace','ExceptionStackTrace')
+    $limits = @(256,256,2048,4096,2048)
+    for ($i = 0; $i -lt $names.Count; $i++) {
+      if ($values[$i] -is [string]) {
+        $value = $values[$i]
+        if ($value.Length -gt $limits[$i]) { $value = $value.Substring(0, $limits[$i]); $entry.TextTruncated = $true; $textTruncated = $true }
+        $entry[$names[$i]] = $value
+      }
+    }
+    $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($entry | ConvertTo-Json -Compress))))
+    if ($seen.Contains($key)) { $repeated++; continue }
+    # Prefer actual engine/runtime evidence over common handled Pester flow.
+    # This priority affects this private diagnostic sample only, never health.
+    $bucket = if ($record.FullyQualifiedErrorId -cin @('PesterAssertionFailed','PesterTestSkipped','PesterTestInconclusive')) { ,$control } else { ,$primary }
+    $limit = if ([object]::ReferenceEquals($bucket, $primary)) { 32 } else { 8 }
+    if ($bucket.Count -ge $limit) { $omitted++; continue }
+    $null = $seen.Add($key)
+    $bucket.Add($entry)
+  }
+  $entries = [Collections.Generic.List[object]]::new()
+  foreach ($entry in $primary) { $entries.Add($entry) }
+  foreach ($entry in $control) {
+    if ($entries.Count -lt 32) { $entries.Add($entry) } else { $omitted++ }
+  }
+  $document = [ordered]@{
+    SchemaVersion = 1; Kind = 'MaesterAutomationFailureDiagnostics'; InvocationId = $InvocationId
+    RequestedJobId = $RequestedJobId; FailureCode = $FailureCode
+    DiagnosticOnly = $true; SourceEntryCount = $sourceCount; RepeatedEntryCount = $repeated
+    UnsupportedEntryCount = $unsupported; OmittedEntryCount = $omitted
+    TextTruncated = $textTruncated; EntriesTruncated = ($omitted -gt 0); Entries = @($entries.ToArray())
+  }
+  # Bounded projection before serialization; enforce a final UTF-8 byte cap too.
+  do {
+    $document.Entries = @($entries.ToArray())
+    $json = $document | ConvertTo-Json -Depth 5 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -le 262144) { return $json }
+    $entries.RemoveAt($entries.Count - 1)
+    $document.OmittedEntryCount++; $document.EntriesTruncated = $true
+  } while ($entries.Count -ge 0)
+}
+
+function Publish-FailedAssessmentArtifacts {
+  param([AllowNull()][object]$DiagnosticErrors, [string]$InvocationId, [string]$RequestedJobId, [string]$FailureCode,
+    [string]$RunDirectory, [string]$AccountName, [string]$Container, [string]$DashboardContainer)
+  $ErrorActionPreference = 'Stop'
+  $ProgressPreference = 'SilentlyContinue'
+  # Prefix and stream values are generated/fixed scalars, never upstream text.
+  if ($InvocationId -cnotmatch '^[0-9a-f]{32}\z') { return }
+  $prefix = "failed/$InvocationId"
+  $diagnosticStatus = 'Unavailable'; $junitStatus = 'Unavailable'
+  if ([string]::IsNullOrWhiteSpace($AccountName)) {
+    Write-Output "assessment.failureArtifacts: invocation=$InvocationId; diagnostics=Disabled; junit=Disabled"
+    return
+  }
+  if ($AccountName -cnotmatch '^[a-z0-9]{3,24}\z' -or $Container -cnotmatch '^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]\z' -or
+      $Container.Contains('--') -or $Container -eq $DashboardContainer -or $Container -eq '$web') {
+    Write-Output "assessment.failureArtifacts: invocation=$InvocationId; diagnostics=DestinationRejected; junit=DestinationRejected"
+    return
+  }
+  if ($RequestedJobId -and $RequestedJobId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z') { $RequestedJobId = '' }
+  if ($FailureCode -cnotmatch '^assessment\.[A-Za-z]+\z') { $FailureCode = 'assessment.healthCheckFailed' }
+  $diagnosticPath = Join-Path $RunDirectory 'failure-diagnostics.json'
+  $failedJunitPath = Join-Path $RunDirectory 'pester-junit.xml'
+  $diagnosticReady = $false; $junitReady = $false
+  try {
+    $json = New-FailedAssessmentDiagnostic -DiagnosticErrors $DiagnosticErrors -InvocationId $InvocationId -RequestedJobId $RequestedJobId -FailureCode $FailureCode
+    [IO.File]::WriteAllText($diagnosticPath, $json, [Text.UTF8Encoding]::new($false))
+    $diagnosticReady = $true
+  } catch { }
+  try {
+    # Only this invocation's fixed path, never discovered/returned artifact paths.
+    # Reject links, empty files and oversized JUnit rather than uploading a part.
+    $file = Get-Item -LiteralPath $failedJunitPath -Force
+    $junitReady = $file -is [IO.FileInfo] -and -not $file.LinkType -and $file.Length -gt 0 -and $file.Length -le 16777216
+  } catch { }
+  if ($diagnosticReady -or $junitReady) {
+    $failureStorageToken = $null
+    try {
+      $failureStorageToken = Get-PlainToken -ResourceUrl 'https://storage.azure.com/' 2>$null 3>$null 4>$null 5>$null 6>$null
+      if ([string]::IsNullOrWhiteSpace($failureStorageToken)) { throw 'assessment.failureArtifactTokenUnavailable' }
+      # Check only the configured existing container. Never create containers,
+      # change access, follow redirects, or infer privacy from a container name.
+      $headHeaders = @{ Authorization = "Bearer $failureStorageToken"; 'x-ms-version' = '2021-12-02'; 'x-ms-date' = [datetime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture) }
+      $properties = Invoke-WebRequest -Method Head -Uri "https://$AccountName.blob.core.windows.net/$Container`?restype=container" -Headers $headHeaders -MaximumRedirection 0 -MaximumRetryCount 0 -ConnectionTimeoutSeconds 10 -OperationTimeoutSeconds 15 -SkipHttpErrorCheck 2>$null 3>$null 4>$null 5>$null 6>$null
+      if ($properties.StatusCode -isnot [int] -or $properties.StatusCode -ne 200 -or $properties.Headers -isnot [Collections.IDictionary]) { throw 'assessment.failureArtifactPrivateCheckFailed' }
+      if (@($properties.Headers.Keys | Where-Object { $_ -ieq 'x-ms-blob-public-access' }).Count -ne 0) {
+        Write-Output "assessment.failureArtifacts: invocation=$InvocationId; diagnostics=DestinationNotPrivate; junit=DestinationNotPrivate"
+        return
+      }
+      if ($diagnosticReady) {
+        try {
+          Set-BlobContent -AccountName $AccountName -Container $Container -BlobName "$prefix/diagnostics.json" -SourcePath $diagnosticPath -StorageToken $failureStorageToken -ContentType 'application/json' -AccessTier 'Cool' -BoundedRequest *> $null
+          $diagnosticStatus = 'Published'
+        } catch { $diagnosticStatus = 'UploadFailed' }
+      }
+      if ($junitReady) {
+        try {
+          Set-BlobContent -AccountName $AccountName -Container $Container -BlobName "$prefix/pester-junit.xml" -SourcePath $failedJunitPath -StorageToken $failureStorageToken -ContentType 'application/xml' -AccessTier 'Cool' -BoundedRequest *> $null
+          $junitStatus = 'Published'
+        } catch { $junitStatus = 'UploadFailed' }
+      }
+    } catch {
+      if ($diagnosticReady) { $diagnosticStatus = 'UploadFailed' }
+      if ($junitReady) { $junitStatus = 'UploadFailed' }
+    } finally { $failureStorageToken = $null }
+  }
+  Write-Output "assessment.failureArtifacts: invocation=$InvocationId; prefix=$prefix; diagnostics=$diagnosticStatus; junit=$junitStatus"
 }
 
 function Compress-GzipFile {
@@ -571,7 +703,8 @@ if ($RequireNoMail -and -not [string]::IsNullOrWhiteSpace($MailRecipient)) {
   throw 'assessment.mailMustBeDisabled'
 }
 
-$tempRoot = Join-Path -Path $env:TEMP -ChildPath ("maester-{0}-{1}" -f (Get-Date -Format 'yyyyMMddHHmmss'), [guid]::NewGuid().ToString('N'))
+$assessmentInvocationId = [guid]::NewGuid().ToString('N')
+$tempRoot = Join-Path -Path $env:TEMP -ChildPath ("maester-{0}-{1}" -f (Get-Date -Format 'yyyyMMddHHmmss'), $assessmentInvocationId)
 New-Item -Path $tempRoot -ItemType Directory -Force | Out-Null
 
 $maesterModule = Get-Module -Name Maester |
@@ -639,19 +772,19 @@ if (-not [string]::IsNullOrWhiteSpace($MailRecipient)) {
   Write-Output 'Upstream inline email is configured; delivery is unverified.'
 }
 
+$invocationDiagnosticErrors = $null
 $previousDriftRoot = [Environment]::GetEnvironmentVariable('MAESTER_FOLDER_DRIFT', 'Process')
 try {
   [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', [System.Management.Automation.Language.NullString]::Value, 'Process')
   $ErrorActionPreference = 'Continue'
-  # ErrorVariable also captures errors handled inside Maester/Pester (including
-  # policy assertion and skip control flow). Capture only errors emitted across
-  # this invocation boundary; the result/JUnit gate below still inspects every
-  # test ErrorRecord and every engine error without a message/type blacklist.
-  $invocationOutput = @(Invoke-Maester @maesterInvokeParameters 2>&1 3>$null 4>$null 5>$null 6>$null)
+  # ErrorVariable is private diagnostic evidence only, including handled
+  # assertion/skip control flow. Only emitted errors feed the boundary gate.
+  $invocationOutput = @(Invoke-Maester @maesterInvokeParameters -ErrorVariable invocationDiagnosticErrors 2>&1 3>$null 4>$null 5>$null 6>$null)
   $invocationErrors = @($invocationOutput | Where-Object { $_ -is [Management.Automation.ErrorRecord] })
   $maesterOutput = @($invocationOutput | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] })
 }
 catch {
+  try { Publish-FailedAssessmentArtifacts -DiagnosticErrors @($invocationDiagnosticErrors) -InvocationId $assessmentInvocationId -RequestedJobId $ValidationJobId -FailureCode 'assessment.invokeFailed' -RunDirectory $tempRoot -AccountName $StorageAccountName -Container $ExportContainer -DashboardContainer $DashboardContainer } catch { }
   throw 'assessment.invokeFailed'
 }
 finally {
@@ -663,8 +796,19 @@ finally {
   }
   [Environment]::SetEnvironmentVariable('MAESTER_FOLDER_DRIFT', $restoreDriftRoot, 'Process')
 }
-if ($invocationErrors.Count -gt 0) { throw 'assessment.invocationErrors' }
-$assessmentEvidence = Get-MaesterAssessmentEvidence -Output $maesterOutput -JunitPath $junitPath -TestsPath $testsPath -ReportPath $outputHtmlPath
+if ($invocationErrors.Count -gt 0) {
+  try { Publish-FailedAssessmentArtifacts -DiagnosticErrors @($invocationDiagnosticErrors + $invocationErrors) -InvocationId $assessmentInvocationId -RequestedJobId $ValidationJobId -FailureCode 'assessment.invocationErrors' -RunDirectory $tempRoot -AccountName $StorageAccountName -Container $ExportContainer -DashboardContainer $DashboardContainer } catch { }
+  throw 'assessment.invocationErrors'
+}
+# END assessment invocation boundary.
+try {
+  $assessmentEvidence = Get-MaesterAssessmentEvidence -Output $maesterOutput -JunitPath $junitPath -TestsPath $testsPath -ReportPath $outputHtmlPath
+}
+catch {
+  $assessmentFailure = $_
+  try { Publish-FailedAssessmentArtifacts -DiagnosticErrors @($invocationDiagnosticErrors) -InvocationId $assessmentInvocationId -RequestedJobId $ValidationJobId -FailureCode $assessmentFailure.Exception.Message -RunDirectory $tempRoot -AccountName $StorageAccountName -Container $ExportContainer -DashboardContainer $DashboardContainer } catch { }
+  throw $assessmentFailure
+}
 Write-Output 'Maester assessment health verified; policy findings may remain.'
 $publication = [ordered]@{
   Archive = 'Disabled'; Latest = 'Disabled'; WebApp = 'Disabled'
