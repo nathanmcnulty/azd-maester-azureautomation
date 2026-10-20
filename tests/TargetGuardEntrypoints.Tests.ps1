@@ -410,14 +410,11 @@ Export-ModuleMember -Function *
     $f.CachedDefault.id | Should -BeExactly $script:guardOther
   }
 
-  It 'validates the actual preup target and defers creation to ownership-aware preprovision' {
-    $f = $global:targetGuard; $f.AllowGroupCreate = $true
-    Invoke-GuardEntrypoint -Name 'Run-AzdPreUp.ps1'
-    $f.Writes.Count | Should -Be 0
-    @($f.Cli | Where-Object { $_ -match "^group exists --name rg-guard --subscription $script:guardSub" }).Count | Should -Be 1
-    $f.Cli[0] | Should -Match '^rest '
-    ($f.Cli -join '|') | Should -Not -Match 'account set|account list|account show|login'
-    $f.CachedDefault.id | Should -BeExactly $script:guardOther
+  It 'blocks unavailable postprovision interaction during actual preup before ARM writes' {
+    $env:AZD_NON_INTERACTIVE = 'true'
+    { Invoke-GuardEntrypoint -Name 'Run-AzdPreUp.ps1' } | Should -Throw '*requires interactive login approval*'
+    Assert-GuardNoWrites
+    ($global:targetGuard.Cli -join '|') | Should -Not -Match 'account set|account list|account show|login'
   }
 
   It 'captures the real Exchange helper splat with only the intended tenant selector' {

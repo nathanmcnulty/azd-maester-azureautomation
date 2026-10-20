@@ -78,7 +78,8 @@ function Resolve-MaesterInfrastructureContext {
   if ($selectedGroup -cnotmatch '^[A-Za-z0-9_().-]{1,90}$' -or $selectedGroup.EndsWith('.')) { throw 'The selected resource-group name is invalid.' }
   foreach ($pair in @(
     @('AZURE_ENV_NAME', $EnvironmentName), @('AZURE_TENANT_ID', $values['AZURE_TENANT_ID']),
-    @('AZURE_SUBSCRIPTION_ID', $values['AZURE_SUBSCRIPTION_ID']), @('AZURE_RESOURCE_GROUP', $selectedGroup))) {
+    @('AZURE_SUBSCRIPTION_ID', $values['AZURE_SUBSCRIPTION_ID']), @('AZURE_RESOURCE_GROUP', $selectedGroup),
+    @('AZURE_LOCATION', $values['AZURE_LOCATION']))) {
     $ambient = [Environment]::GetEnvironmentVariable($pair[0])
     if ($ambient -and $ambient -ine $pair[1]) { throw "The process $($pair[0]) differs from the selected azd environment." }
   }
@@ -229,8 +230,11 @@ function Assert-MaesterInfrastructureGroup {
 function Initialize-MaesterInfrastructureOwnership {
   [CmdletBinding()]
   param([Parameter(Mandatory)][string]$ProjectRoot, [Parameter(Mandatory)][string]$EnvironmentName,
-    [Parameter(Mandatory)][string]$SolutionName, [string]$TenantId, [string]$SubscriptionId, [string]$ResourceGroupName)
-  $context = Resolve-MaesterInfrastructureContext @PSBoundParameters
+    [Parameter(Mandatory)][string]$SolutionName, [string]$TenantId, [string]$SubscriptionId, [string]$ResourceGroupName,
+    [switch]$RequireExisting)
+  $targetParameters = @{} + $PSBoundParameters
+  $targetParameters.Remove('RequireExisting')
+  $context = Resolve-MaesterInfrastructureContext @targetParameters
   $session = Open-MaesterInfrastructureReceipt $context
   try {
     $receipt = Read-MaesterInfrastructureReceipt $session
@@ -247,6 +251,7 @@ function Initialize-MaesterInfrastructureOwnership {
       return [pscustomobject]@{ Owned = $false; State = 'Existing'; ResourceGroupId = $context.binding.resourceGroupId }
     }
     if ($group.StatusCode -ne 404) { throw 'Could not prove the exact resource group was absent. No create was attempted.' }
+    if ($RequireExisting) { throw 'The access-preserving upgrade requires an existing resource group; no create was attempted.' }
     $location = [string]$context.values['AZURE_LOCATION']
     if ($location -cnotmatch '^[a-zA-Z0-9]+$') { throw 'An explicit Azure location is required before resource-group creation.' }
     Set-MaesterInfrastructureResourceGroup $EnvironmentName $context.resourceGroupName $context.root
@@ -443,4 +448,4 @@ function Resolve-MaesterInfrastructureBinding {
   } finally { $session.lock.Dispose() }
 }
 
-Export-ModuleMember -Function Register-MaesterExternalSetupStarted, Resolve-MaesterInfrastructureBinding, Initialize-MaesterInfrastructureOwnership, Complete-MaesterInfrastructureOwnership, Test-MaesterInfrastructureOwnership, Unlock-MaesterInfrastructureLocks
+Export-ModuleMember -Function Resolve-MaesterInfrastructureContext, Register-MaesterExternalSetupStarted, Resolve-MaesterInfrastructureBinding, Initialize-MaesterInfrastructureOwnership, Complete-MaesterInfrastructureOwnership, Test-MaesterInfrastructureOwnership, Unlock-MaesterInfrastructureLocks

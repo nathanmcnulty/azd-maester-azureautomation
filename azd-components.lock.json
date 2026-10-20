@@ -21,9 +21,9 @@
     },
     {
       "id": "maester-azd-hooks",
-      "version": "3.1.1",
+      "version": "4.0.0",
       "sourceRepository": "https://github.com/nathanmcnulty/azd-reference",
-      "sourceRevision": "def75ea1d03636ebae234c5e0b9c0fda25f0f9bf",
+      "sourceRevision": "624b0fe531c78dd8a7e6915553faeec74365b000",
       "files": [
         {
           "source": "components/powershell/maester-azd-hooks/Get-ManagedIdentityPrincipal.ps1",
@@ -48,12 +48,12 @@
         {
           "source": "components/powershell/maester-azd-hooks/Maester-PreProvision.psm1",
           "target": "scripts/vendor/Azd.MaesterHooks/Maester-PreProvision.psm1",
-          "sha256": "e2d0c0c000e8d08e9667291b6ff53888a75df2cf372f16522729ef09431b08b3"
+          "sha256": "1cea06bf2a5a391b1fce4cd042a930487223d86e99d547177be64d5d40cf12b5"
         },
         {
           "source": "components/powershell/maester-azd-hooks/Maester-PreUp.psm1",
           "target": "scripts/vendor/Azd.MaesterHooks/Maester-PreUp.psm1",
-          "sha256": "623423920e208ce5d7d492968e738ce01bcd3d43512bd831a743abcbb3684238"
+          "sha256": "b01144bfddad89dea9909384be7b9b1af21aa9a96405ca36943e9dadd292d5a9"
         },
         {
           "source": "components/powershell/maester-azd-hooks/Maester-SetupHelpers.psm1",
@@ -63,7 +63,7 @@
         {
           "source": "components/powershell/maester-azd-hooks/Maester-UpWizard.psm1",
           "target": "scripts/vendor/Azd.MaesterHooks/Maester-UpWizard.psm1",
-          "sha256": "f19c2ad583811124bfd211d4ad62b5c4c7387a3ea1d336e6d3d11c546704f479"
+          "sha256": "32e27da63ea3a0b2d9d377aa0a85f61d967f37a24b31ca4e94d3367c59b2e5ad"
         },
         {
           "source": "components/powershell/maester-azd-hooks/Maester-ConsentPlan.psm1",
@@ -83,7 +83,7 @@
         {
           "source": "components/powershell/maester-azd-hooks/Maester-InfrastructureOwnership.psm1",
           "target": "scripts/vendor/Azd.MaesterHooks/Maester-InfrastructureOwnership.psm1",
-          "sha256": "f2d316ded17073743bf1b09a162c692e267441de96071b18b67be32dbaa6774f"
+          "sha256": "49f76e43a48944a4ec4cdaf1ca6d9ef0a7a829062f41952c2749d4db6c1180a9"
         },
         {
           "source": "components/powershell/maester-azd-hooks/Invoke-MaesterDown.ps1",

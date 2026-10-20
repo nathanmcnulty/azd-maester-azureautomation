@@ -36,6 +36,7 @@ Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId
 $location = $env:AZURE_LOCATION
 Invoke-MaesterPreProvision `
   -SolutionName 'automation-account' `
+  -ProjectRoot (Split-Path $PSScriptRoot -Parent) -EnvironmentName $EnvironmentName `
   -SubscriptionId $SubscriptionId `
   -TenantId $TenantId `
   -Location $location
@@ -245,9 +246,4 @@ else {
   Write-Warning 'AZURE_LOCATION not set. Skipping Automation Account quota check.'
 }
 
-# Capture infrastructure separately from optional Graph/setup. Only this hook's
-# exact HTTP 201 response can establish fresh dedicated resource-group ownership.
-Import-Module (Join-Path $PSScriptRoot 'vendor/Azd.MaesterHooks/Maester-InfrastructureOwnership.psm1') -Force
-Initialize-MaesterInfrastructureOwnership -ProjectRoot (Split-Path $PSScriptRoot -Parent) `
-  -EnvironmentName $env:AZURE_ENV_NAME -SolutionName 'automation-account' `
-  -TenantId $TenantId -SubscriptionId $SubscriptionId | Out-Null
+# Shared preflight already validated/captured ownership before these host checks.

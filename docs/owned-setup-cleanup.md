@@ -108,3 +108,25 @@ physical data erasure beyond the provider's retention behavior.
 ## Dedicated-object boundary
 
 Deployment-owned applications, identities and Azure DevOps objects must remain dedicated throughout their lifetime. Do not repurpose, share or concurrently edit them. Cleanup checks the reviewed configuration fields and dependencies; it does not inventory every possible application property or downstream reference and cannot guarantee detection of arbitrary later reuse. The separately administered setup client remains outside this ownership boundary.
+
+## Resource-group preflight before azd initialization
+
+Hooks 4.0 prepares the explicitly selected environment in preup, before native azd
+up initializes its resource-group-scoped Bicep provider. It validates required
+setup inputs and interactive approval availability, pins one exact resource-group
+name, and records the live 404 → durable Pending → matching PUT 201 → Created
+sequence before azd can create the group independently. It neither grants access
+nor signs in to Graph. Postprovision remains a separate process with its existing
+explicit login and plan-approval prompts.
+
+Project preprovision repeats the same target and receipt checks for direct azd
+provision, using saved wizard settings without duplicate questions. To collect
+new options, run azd up or the preup wrapper interactively first. Direct provision
+requires configured setup identity/options. An explicit resource-group name is
+preserved; otherwise the common default is `rg-<environment>`.
+
+The existing `AUTOMATION_UPGRADE_PRESERVE_ACCESS=true` path can remain headless,
+but cannot create a missing resource group. It retains the existing setup identity
+validation and exact live-account, association, source and preservation checks.
+This does not introduce a new no-setup mode or recover older receiptless groups.
+Existing unowned groups stay unowned; race200 and unresolved Pending stay blocked.
