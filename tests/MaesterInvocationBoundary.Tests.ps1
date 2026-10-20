@@ -1,7 +1,7 @@
 BeforeAll {
     $runner = Get-Content (Join-Path $PSScriptRoot '../scripts/Invoke-MaesterAutomationRunbook.ps1') -Raw
     $start = $runner.IndexOf('$previousDriftRoot =')
-    $end = $runner.IndexOf('$assessmentEvidence = Get-MaesterAssessmentEvidence', $start)
+    $end = $runner.IndexOf('# END assessment invocation boundary.', $start)
     if ($start -lt 0 -or $end -le $start) { throw 'Production invocation boundary not found.' }
     $invokeBlock = [scriptblock]::Create($runner.Substring($start, $end - $start))
     function Invoke-Maester {
@@ -36,6 +36,7 @@ Describe 'Actual emitted error stream boundary' {
         $script:mode = $_
         . $invokeBlock
         @($invocationErrors).Count | Should -Be 0
+        if ($script:mode -ne 'normal') { @($invocationDiagnosticErrors).Count | Should -BeGreaterThan 0 }
         @($maesterOutput).Count | Should -Be 2
         $maesterOutput[0] | Should -BeExactly 'incidental output'
         [object]::ReferenceEquals($maesterOutput[1], $script:expectedResult) | Should -BeTrue
