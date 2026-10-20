@@ -158,6 +158,7 @@ function Set-BlobContent {
   $headers = @{
     'Authorization' = "Bearer $StorageToken"
     'x-ms-version' = '2021-12-02'
+    'x-ms-date' = [datetime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture)
     'x-ms-blob-type' = 'BlockBlob'
     'x-ms-access-tier' = $AccessTier
   }
@@ -168,7 +169,6 @@ function Set-BlobContent {
 
   $requestOptions = @{}
   if ($BoundedRequest) {
-    $headers['x-ms-date'] = [datetime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture)
     $requestOptions = @{ ConnectionTimeoutSeconds = 10; OperationTimeoutSeconds = 30; MaximumRetryCount = 0; MaximumRedirection = 0 }
   }
   Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -InFile $SourcePath -ContentType $ContentType @requestOptions | Out-Null
