@@ -71,6 +71,9 @@ function Test-InteractiveWizard {
 function Test-AzdNoPromptInvocation {
   try {
     $currentPid = $PID
+    if (-not $IsWindows) {
+      $processCommand = (Get-Command ps -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    }
     for ($depth = 0; $depth -lt 10; $depth++) {
       if ($IsWindows) {
         $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid" -ErrorAction Stop
@@ -82,9 +85,9 @@ function Test-AzdNoPromptInvocation {
       else {
         $process = Get-Process -Id $currentPid -ErrorAction Stop
         $name = [string]$process.ProcessName
-        $commandLine = (& ps -p $currentPid -o command=) -join ' '
+        $commandLine = (& $processCommand -p $currentPid -o command=) -join ' '
         if ($LASTEXITCODE -ne 0) { break }
-        $parentText = (& ps -p $currentPid -o ppid=) -join ''
+        $parentText = (& $processCommand -p $currentPid -o ppid=) -join ''
         if ($LASTEXITCODE -ne 0) { break }
         $parentPid = [int]$parentText.Trim()
       }

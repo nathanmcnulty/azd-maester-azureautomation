@@ -21,9 +21,9 @@
     },
     {
       "id": "maester-azd-hooks",
-      "version": "4.0.0",
+      "version": "4.0.1",
       "sourceRepository": "https://github.com/nathanmcnulty/azd-reference",
-      "sourceRevision": "624b0fe531c78dd8a7e6915553faeec74365b000",
+      "sourceRevision": "f5a66c4af4135748078939a5fb34296ff1edaada",
       "files": [
         {
           "source": "components/powershell/maester-azd-hooks/Get-ManagedIdentityPrincipal.ps1",
@@ -63,7 +63,7 @@
         {
           "source": "components/powershell/maester-azd-hooks/Maester-UpWizard.psm1",
           "target": "scripts/vendor/Azd.MaesterHooks/Maester-UpWizard.psm1",
-          "sha256": "32e27da63ea3a0b2d9d377aa0a85f61d967f37a24b31ca4e94d3367c59b2e5ad"
+          "sha256": "484196aba5e2f52e905f17c96b7ebe20a0b429945cfca9e3b5a0e91598d6af84"
         },
         {
           "source": "components/powershell/maester-azd-hooks/Maester-ConsentPlan.psm1",
