@@ -103,7 +103,7 @@ BeforeAll {
         $global:maesterUpgradeCalls.Add("az $command")
         $global:LASTEXITCODE = 0
         if ($command -like 'group exists *') { return $global:maesterUpgradeScenario.GroupExists }
-        if ($command -like 'automation account list *') { return '[]' }
+        if ($command -like 'resource list *') { return '[]' }
         if ($command -notlike 'rest --method GET *') { throw "Unexpected Azure call: $command" }
         foreach ($id in $global:maesterUpgradeScenario.ExtraResources.Keys) {
           if ($command.Contains("$id`?")) { return ($global:maesterUpgradeScenario.ExtraResources[$id] | ConvertTo-Json -Depth 20 -Compress) }

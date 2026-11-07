@@ -19,6 +19,9 @@ Describe 'Assessment evidence through the complete maintained Automation runbook
       if ($name -eq 'Maester') {
         New-Item -ItemType Directory (Join-Path $source 'maester-tests') | Out-Null
         Set-Content (Join-Path $source 'maester-tests/Fixture.Tests.ps1') '# Offline discovery fixture'
+        $whatIfDirectory = Join-Path $source 'maester-tests/Maester/Entra'
+        New-Item -ItemType Directory -Path $whatIfDirectory -Force | Out-Null
+        Copy-Item (Join-Path $PSScriptRoot 'fixtures/maester-230/WhatIfDiscovery.ps1') (Join-Path $whatIfDirectory 'Test-ConditionalAccessWhatIf.Tests.ps1')
       }
       [IO.Compression.ZipFile]::CreateFromDirectory($source, (Join-Path $fixtures "$name.$version.nupkg"))
     }
@@ -64,6 +67,8 @@ Describe 'Assessment evidence through the complete maintained Automation runbook
     $receipt.Assessment.Counts.FailedCount | Should -Be 1
     $receipt.Publication.Mail | Should -BeExactly 'Disabled'
     $receipt.Runtime.Modules.Count | Should -Be 7
+    ($r.Output -join "`n") | Should -Match 'MAESTER_TEST_COMPATIBILITY_V1:'
+    ($r.Output -join "`n") | Should -Match '957AC886DF9FFFBEB75BA5F27CE0735057142F8BEDEA383D80FFE4858D138939'
     $r.Drift | Should -BeNullOrEmpty
     $r.RestoredDrift | Should -BeExactly 'unapproved-inherited-drift'
     $e = Read-AutomationJobEvidence -Output ($r.Output -join "`n") -JobContent $runbookText -ExpectedContent $runbookText -JobId $receipt.RequestedJobId -NotBefore ([datetimeoffset]::UtcNow.AddMinutes(-1)) -RequireNoMail

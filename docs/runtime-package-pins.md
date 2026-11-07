@@ -52,3 +52,24 @@ and the nine exact package versions and hashes above. Package-import
 observations do not establish runbook execution on this runtime. Microsoft documents
 [PowerShell 7.6 Automation support](https://learn.microsoft.com/en-us/azure/automation/automation-runbook-types#powershell-runbooks);
 [PowerShell 7.6 uses .NET 10 LTS](https://learn.microsoft.com/en-us/powershell/scripting/install/powershell-support-lifecycle).
+
+## Conditional Access What-If discovery compatibility
+
+The verified Maester 2.3.0 archive contains a test that assumes sampled users
+remain arrays. PowerShell can unwrap a singleton, and filtering out emergency
+access users can produce another singleton. The resulting `IndexOf` call fails
+during discovery instead of assessing Conditional Access.
+
+Before assessment, the runbook applies a bounded correction to that one test:
+five assignments retain arrays, and its two contexts explicitly allow empty
+`ForEach` data in Pester 6.2. Existing users keep the same test IDs and Graph
+requests. Empty collections cause no user test requests. No global discovery
+setting or framework health gate is weakened.
+
+The original normalized file SHA-256 must be
+`4EAFA3104AA711BB186E0633AC1EF8BA9074F9160AF8573D35570559B03BA384`;
+the effective normalized SHA-256 must be
+`957AC886DF9FFFBEB75BA5F27CE0735057142F8BEDEA383D80FFE4858D138939`.
+Unknown content fails closed. The `MAESTER_TEST_COMPATIBILITY_V1` output records
+both identities. Package downloads and their existing archive pins remain
+unchanged; the effective test file includes this disclosed correction.

@@ -119,3 +119,11 @@ Offline entrypoint tests substitute version metadata and isolated package fixtur
 they prove gate and branch behavior, not native assessment success. Full workload
 execution, identity permissions, optional integrations, report delivery, and cleanup
 remain separate native acceptance gates.
+
+## Regional Automation account inventory
+
+The preprovision account count uses Azure CLI's core `az resource list`; the
+Automation extension is unnecessary. Failed or malformed reads stop provisioning.
+Counts near published default limits produce guidance rather than assuming an
+increased or grandfathered quota is impossible. Verify the subscription's actual
+quota when needed; see [Microsoft's Automation quota guidance](https://learn.microsoft.com/en-us/azure/automation/automation-subscription-limits-faq).

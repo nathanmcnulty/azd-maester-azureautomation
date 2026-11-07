@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Resolve-DeploymentTargets.ps1')
 . (Join-Path $PSScriptRoot 'JobScheduleOwnership.ps1')
+. (Join-Path $PSScriptRoot 'Get-AutomationAccountCount.ps1')
 
 $EnvironmentName = if ($env:AZURE_ENV_NAME) { $env:AZURE_ENV_NAME } else { '' }
 if ([string]::IsNullOrWhiteSpace($EnvironmentName)) { throw 'AZURE_ENV_NAME must identify the selected azd environment.' }
@@ -221,19 +222,16 @@ if ($preserveUpgradeAccess) {
 elseif ($location) {
   Write-Host "Checking Automation Account quota in region '$location'..."
   try {
-    $existingAccountsJson = az automation account list --subscription $SubscriptionId --query "[?location=='$location']" -o json 2>$null
-    if ($LASTEXITCODE -eq 0 -and $existingAccountsJson) {
-      $existingAccounts = $existingAccountsJson | ConvertFrom-Json
-      $count = @($existingAccounts).Count
-      # Quota varies by subscription type: Enterprise/CSP = 10, PAYG/MSDN = 2, Free Trial = 1
-      if ($count -ge 10) {
-        throw "There are already $count Automation Accounts in region '$location'. This exceeds the maximum quota (10 for Enterprise, 2 for PAYG). Provision will fail. Delete unused Automation Accounts or choose a different region."
-      }
-      elseif ($count -ge 2) {
-        Write-Warning "There are already $count Automation Accounts in region '$location'. The quota is 2 for Pay-as-you-go/MSDN subscriptions (10 for Enterprise/CSP). If your subscription type has a lower limit, provision may fail."
-      }
-      Write-Host "  Found $count existing Automation Account(s) in '$location'."
+    $count = Get-MaesterAutomationAccountCount -SubscriptionId $SubscriptionId -Location $location
+    # Published defaults vary by subscription; increases and grandfathered
+    # usage exist. Account count alone does not prove the actual quota.
+    if ($count -ge 10) {
+      Write-Warning "There are already $count Automation Accounts in region '$location'. The published Enterprise/CSP default is 10; verify your actual quota before provisioning. Increased or grandfathered quotas may be higher."
     }
+    elseif ($count -ge 2) {
+      Write-Warning "There are already $count Automation Accounts in region '$location'. The published Pay-as-you-go/MSDN default is 2 (10 for Enterprise/CSP); verify your actual quota before provisioning."
+    }
+    Write-Host "  Found $count existing Automation Account(s) in '$location'."
   }
   catch [System.Management.Automation.RuntimeException] {
     throw
