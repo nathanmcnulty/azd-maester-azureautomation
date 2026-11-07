@@ -125,11 +125,28 @@ function Invoke-Maester {
     'engine-wrong-junit' { Set-Content (Join-Path $OutputFolder 'older-junit.xml') '<testsuites tests="5" errors="1" failures="1" disabled="3" />' }
     'engine-oversized-junit' { [IO.File]::WriteAllText($PesterConfiguration.TestResult.OutputPath.Value, ' ' * 16777217) }
     'engine-directory-junit' { Remove-Item $PesterConfiguration.TestResult.OutputPath.Value; New-Item -ItemType Directory $PesterConfiguration.TestResult.OutputPath.Value | Out-Null }
-    'engine-symlink-junit' { Move-Item $PesterConfiguration.TestResult.OutputPath.Value (Join-Path $OutputFolder 'linked.xml'); New-Item -ItemType SymbolicLink -Path $PesterConfiguration.TestResult.OutputPath.Value -Target (Join-Path $OutputFolder 'linked.xml') | Out-Null }
+    'engine-symlink-junit' {
+      Move-Item $PesterConfiguration.TestResult.OutputPath.Value (Join-Path $OutputFolder 'linked.xml')
+      # Windows hard links need no elevated symlink privilege and exercise the
+      # same real FileInfo.LinkType rejection. Linux retains its real symlink.
+      $linkType = if ($IsWindows) { 'HardLink' } else { 'SymbolicLink' }
+      New-Item -ItemType $linkType -Path $PesterConfiguration.TestResult.OutputPath.Value -Target (Join-Path $OutputFolder 'linked.xml') -ErrorAction Stop | Out-Null
+    }
   }
   $result
 }
-if ($Mode -eq 'diagnostic-projection-failure') { function ConvertTo-Json { throw 'PRIVATE_PROJECTION_DIAGNOSTIC' } }
+if ($Mode -eq 'diagnostic-projection-failure') {
+  function ConvertTo-Json {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)][AllowNull()]$InputObject, [int]$Depth=2, [switch]$Compress)
+    process {
+      $kind = if ($InputObject -is [Collections.IDictionary]) { [string]$InputObject['Kind'] }
+        elseif ($null -ne $InputObject -and $InputObject.PSObject.Properties['Kind']) { [string]$InputObject.Kind } else { '' }
+      if ($kind -ceq 'MaesterAutomationFailureDiagnostics') { throw 'PRIVATE_PROJECTION_DIAGNOSTIC' }
+      Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $InputObject -Depth $Depth -Compress:$Compress
+    }
+  }
+}
 try {
   $parameters = @{ RequireNoMail = [bool]$RequireNoMail; ExportContainer = $ArchiveContainer; DashboardContainer = $LatestContainer }
   if ($StorageName) { $parameters.StorageAccountName = $StorageName }

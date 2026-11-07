@@ -15,7 +15,7 @@ BeforeAll {
   function Invoke-WhatIfFixture {
     param($Fixture,[int]$Members,[int]$Emergency,[switch]$FilterMemberToOne)
     $output=Join-Path $Fixture.root 'result.json'
-    & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File $harness -TestPath $Fixture.target -ResultPath $output -MemberCount $Members -EmergencyCount $Emergency -FilterMemberToOne:$FilterMemberToOne *> (Join-Path $Fixture.root 'child.log')
+    & (Get-Process -Id $PID).Path -NoProfile -File $harness -TestPath $Fixture.target -ResultPath $output -MemberCount $Members -EmergencyCount $Emergency -FilterMemberToOne:$FilterMemberToOne *> (Join-Path $Fixture.root 'child.log')
     $LASTEXITCODE|Should -Be 0
     Get-Content $output -Raw|ConvertFrom-Json
   }
