@@ -50,7 +50,7 @@ BeforeAll {
         $global:maesterOfflineCalls.Add("az $command")
         $global:LASTEXITCODE = 0
         if ($command -like 'group exists *') { return $global:maesterOfflineScenario.GroupExists }
-        if ($command -like 'automation account list *') { return '[]' }
+        if ($command -like 'resource list *') { return '[]' }
         if ($command -like 'rest --method GET *') {
           if ($command -like '*/runbooks/maester-runbook/content?*') {
             if ($global:maesterOfflineScenario.ContainsKey('FailContent') -and $global:maesterOfflineScenario.FailContent) { $global:LASTEXITCODE = 1; return }
