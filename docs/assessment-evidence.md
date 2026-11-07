@@ -39,6 +39,10 @@ failure; the existing 23-error Minimal-profile result must remain unqualified.
 
 ## Job and source binding
 
+Before creating any job, the direct validator reads the exact Published PowerShell runbook metadata and published content, then requires the same normalized source digest as the local maintained workflow. Missing, unreadable or mismatched source stops before job creation in both assessment and runtime-only modes. A mode flag cannot constrain an older payload that does not implement it. The selected subscription/tenant/Enabled state is refreshed immediately before the job PUT.
+
+This preflight is not an atomic source lock: exclude concurrent publication while validating. Job-specific content verification after execution remains mandatory and has no fallback to the preflight content.
+
 The validator starts one job with a fresh GUID and passes it as `ValidationJobId`.
 The runbook reports it as `RequestedJobId`: this is caller correlation, not a
 claim about Azure host-private metadata. Scheduled runs need no correlation

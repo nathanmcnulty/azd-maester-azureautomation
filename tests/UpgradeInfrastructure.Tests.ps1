@@ -278,6 +278,23 @@ Describe 'Exact existing Automation preservation binding' {
 }
 
 Describe 'Preprovision preservation decision uses readable complete live inventories' {
+  It 'persists an explicit runtime target while preserving existing resource snapshots' {
+    $scenario = New-UpgradePreProvisionScenario
+    $scenario.Values.AUTOMATION_RUNTIME_ENVIRONMENT_NAME = 'PowerShell-76-Maester-230'
+    $before = $scenario.Responses | ConvertTo-Json -Depth 30 -Compress
+    Invoke-UpgradePreProvision -Scenario $scenario
+    ($global:maesterUpgradeCalls -join '|') | Should -Match 'azd env set -e test AUTOMATION_RUNTIME_ENVIRONMENT_NAME PowerShell-76-Maester-230'
+    ($global:maesterUpgradeCalls -join '|') | Should -Not -Match '--method (PUT|POST|PATCH|DELETE)'
+    ($scenario.Responses | ConvertTo-Json -Depth 30 -Compress) | Should -BeExactly $before
+  }
+
+  It 'rejects an invalid runtime target before environment or Azure writes' {
+    $scenario = New-UpgradePreProvisionScenario
+    $scenario.Values.AUTOMATION_RUNTIME_ENVIRONMENT_NAME = '../old-runtime'
+    { Invoke-UpgradePreProvision -Scenario $scenario } | Should -Throw '*must start with a letter*'
+    ($global:maesterUpgradeCalls -join '|') | Should -Not -Match 'env set|--method (PUT|POST|PATCH|DELETE)'
+  }
+
   It 'refreshes a stale existing flag from live state and leaves all Azure resources unchanged' {
     $scenario = New-UpgradePreProvisionScenario
     $scenario.Values.AUTOMATION_EXISTING_RESOURCES = 'false'
@@ -485,6 +502,7 @@ Describe 'Compiled ARM preservation branches' {
         }
         'equals' { return [object]::Equals($values[0], $values[1]) }
         'toLower' { return ([string]$values[0]).ToLowerInvariant() }
+        'format' { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, [string]$values[0], [object[]]@($values | Select-Object -Skip 1)) }
         'not' { return -not [bool]$values[0] }
         'and' { return @($values | Where-Object { -not [bool]$_ }).Count -eq 0 }
         'or' { return @($values | Where-Object { [bool]$_ }).Count -gt 0 }
@@ -507,6 +525,7 @@ Describe 'Compiled ARM preservation branches' {
       @{
         existingAutomationResourcesOption = $Existing; preserveUpgradeAccessOption = $Preserve; location = 'eastus2'
         includeWebAppOption = 'true'; includeExchangeOption = 'true'; includeTeamsOption = 'true'; enableResourceLocks = $true
+        automationRuntimeEnvironmentName = 'PowerShell-76-Maester'; environmentName = 'test'
       }
     }
 
@@ -578,6 +597,7 @@ Describe 'Compiled ARM preservation branches' {
     $values = @{
       AZURE_ENV_NAME = 'test'; INCLUDE_WEB_APP = 'true'; INCLUDE_EXCHANGE = 'true'; INCLUDE_TEAMS = 'true'; INCLUDE_AZURE = 'false'
       AZURE_RBAC_SCOPES = '[]'; MAIL_RECIPIENT = ''; WEB_APP_SKU = 'F1'; AUTOMATION_JOB_SCHEDULE_ID = $script:upgradeJobId
+      AUTOMATION_RUNTIME_ENVIRONMENT_NAME = 'PowerShell-76-Maester'
       AUTOMATION_EXISTING_RESOURCES = $Existing; AUTOMATION_UPGRADE_PRESERVE_ACCESS = $Preserve
       AUTOMATION_EXISTING_RUNBOOK_METADATA = ($metadata | ConvertTo-Json -Depth 5 -Compress)
     }
@@ -608,7 +628,7 @@ Describe 'Compiled ARM preservation branches' {
     $nameOutput.type | Should -Be 'string'
     $versionOutput.type | Should -Be 'string'
     (Resolve-UpgradeArmExpression -Expression $nameOutput.value -Parameters (Get-UpgradeArmParameters)) |
-      Should -BeExactly $script:upgradeTemplate.variables.runtimeEnvironmentName
+      Should -BeExactly (Resolve-UpgradeArmExpression -Expression $script:upgradeTemplate.variables.runtimeEnvironmentName -Parameters (Get-UpgradeArmParameters))
     $versionOutput.value | Should -BeExactly "[reference(resourceId('Microsoft.Automation/automationAccounts/runtimeEnvironments', variables('automationAccountName'), variables('runtimeEnvironmentName')), '2024-10-23').runtime.version]"
     ($script:upgradeTemplate.resources -is [array]) | Should -BeTrue
     if ($script:upgradeTemplate.PSObject.Properties['languageVersion']) { $script:upgradeTemplate.languageVersion | Should -Be '1.0' }
@@ -623,13 +643,33 @@ Describe 'Compiled ARM preservation branches' {
     @($active | Where-Object { $_.name -match "'ExchangeOnlineManagement'|'MicrosoftTeams'" }).Count | Should -Be 0
   }
 
+  It 'targets only the selected runtime and its packages in bounded mode, leaving the old name unaddressed' {
+    $parameters = Get-UpgradeArmParameters
+    $parameters.automationRuntimeEnvironmentName = 'PowerShell-76-Maester-230'
+    $active = @(Get-ActiveUpgradeResources -Parameters $parameters)
+    $active.Count | Should -Be 10
+    foreach ($resource in $active) {
+      $name = Resolve-UpgradeArmExpression -Expression $resource.name -Parameters $parameters
+      $name | Should -Match '^aa-test/PowerShell-76-Maester-230(/[^/]+)?$'
+      $name | Should -Not -Match '^aa-test/PowerShell-76-Maester(/|$)'
+    }
+    (Resolve-UpgradeArmExpression -Expression $script:upgradeTemplate.outputs.automationRuntimeEnvironmentName.value -Parameters $parameters) | Should -BeExactly 'PowerShell-76-Maester-230'
+  }
+
+  It 'binds a fresh runbook to the selected runtime rather than the default rollback name' {
+    $parameters = Get-UpgradeArmParameters -Existing 'false' -Preserve 'false'
+    $parameters.automationRuntimeEnvironmentName = 'PowerShell-76-Maester-230'
+    $runbook = @($script:upgradeTemplate.resources | Where-Object type -EQ 'Microsoft.Automation/automationAccounts/runbooks')[0]
+    (Resolve-UpgradeArmExpression -Expression $runbook.properties.runtimeEnvironment -Parameters $parameters) | Should -BeExactly 'PowerShell-76-Maester-230'
+  }
+
   It 'retains the pinned seed content and logging defaults only for fresh resources' {
     $runbook = @($script:upgradeTemplate.resources | Where-Object type -EQ 'Microsoft.Automation/automationAccounts/runbooks')[0]
     $parameters = Get-UpgradeArmParameters -Existing 'false' -Preserve 'false'
     $properties = $runbook.properties
     $properties.runbookType | Should -BeExactly 'PowerShell'
     (Resolve-UpgradeArmExpression -Expression $properties.runtimeEnvironment -Parameters $parameters) |
-      Should -BeExactly $script:upgradeTemplate.variables.runtimeEnvironmentName
+      Should -BeExactly (Resolve-UpgradeArmExpression -Expression $script:upgradeTemplate.variables.runtimeEnvironmentName -Parameters $parameters)
     $properties.publishContentLink.uri | Should -Match '^https://raw\.githubusercontent\.com/maester365/maester/[a-f0-9]{40}/powershell/public/Invoke-Maester\.ps1$'
     $properties.publishContentLink.contentHash.algorithm | Should -Be 'sha256'
     $properties.publishContentLink.contentHash.value | Should -Match '^[A-F0-9]{64}$'

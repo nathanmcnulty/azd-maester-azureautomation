@@ -1,3 +1,5 @@
 **/vendor/** text eol=lf
 azd-components.lock.json text eol=lf
 scripts/Setup-PostDeploy.ps1 text eol=lf
+scripts/Maester-SetupConsent.psm1 text eol=lf
+scripts/Run-AzdPostDown.ps1 text eol=lf

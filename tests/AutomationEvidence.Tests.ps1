@@ -99,7 +99,7 @@ Describe 'Strict Automation job receipt and source binding' {
     { Read-AutomationJobEvidence -Output $output @job } | Should -Throw '*jobEvidenceInvalidOrMismatched*'
   }
   It 'permits only BOM and CRLF source normalization' {
-    $job.JobContent = [string][char]0xFEFF + $runbookContent.Replace("`n", "`r`n")
+    $job.JobContent = [string][char]0xFEFF + $runbookContent.Replace("`r`n", "`n").Replace("`n", "`r`n")
     Read-AutomationJobEvidence -Output ('MAESTER_ASSESSMENT_RECEIPT_V1:' + ($receipt | ConvertTo-Json -Depth 8 -Compress)) @job | Should -Not -BeNullOrEmpty
   }
   It 'keeps actual runtime-only imports in a distinct sanitized scope' {

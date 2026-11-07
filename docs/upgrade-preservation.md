@@ -22,6 +22,18 @@ This is not a full solution upgrade. Desired changes to non-runtime infrastructu
 azd env set AUTOMATION_UPGRADE_PRESERVE_ACCESS false
 ```
 
+### Retain the old runtime for rollback
+
+The default runtime target remains `PowerShell-76-Maester`. Updating packages in that same environment affects every runbook bound to it; it does not preserve an untouched old runtime. Before an upgrade that requires retained-runtime rollback, select a distinct reviewed target in the same azd environment:
+
+```powershell
+azd env set AUTOMATION_RUNTIME_ENVIRONMENT_NAME PowerShell-76-Maester-230
+```
+
+Preprovision validates the selected name and rejects process-only targets or conflicting process/environment values. The compiled runtime, all nine package declarations, fresh runbook binding and declared runtime outputs use this target; existing guarded postprovision binds to those outputs. An absent or empty setting retains the original default. A custom name is a target selector, not an adoption, deployment, cleanup or rollback approval.
+
+Inspect the actual preview before applying: the old runtime/packages must have no changes, the new target must be independently verified, and the deployment must remain incremental. Preserve the original script bytes and runtime identity, plus schedules and associations. A distinct runtime name does not bypass the published/local script-content check: a changed script needs its own reviewed update and rollback decision. Native package readiness, runbook binding and restoration remain separate acceptance gates. Do not delete a retained runtime while any runbook or rollback plan depends on it. See [Microsoft's runtime update behavior](https://learn.microsoft.com/en-us/azure/automation/manage-runtime-environment#update-runtime-environment).
+
 `AUTOMATION_EXISTING_RESOURCES` is a derived preprovision value, not a user-supplied adoption mechanism. It is refreshed from live reads and advances after a successful first association. Conflicting process and selected-environment controls fail rather than silently changing mode.
 
 ## Explicitly adopted custom metadata

@@ -56,7 +56,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
       Headers = [Collections.Generic.List[string]]::new(); Reads = [Collections.Generic.List[string]]::new(); Connects = [Collections.Generic.List[object]]::new()
       ReceiptTemplate = New-TestAutomationReceipt; RuntimeTemplate = New-TestRuntimeReceipt
       RunbookContent = Get-Content (Join-Path $script:guardRepo 'scripts/Invoke-MaesterAutomationRunbook.ps1') -Raw
-      EvidenceFault = ''; JobBodies = [Collections.Generic.List[string]]::new(); JobStatus = 'Completed'; JobException = ''; Roles = 0; MetadataFailure = $false; TokenFailure = $false; AllowValidation = $false; AllowGroupCreate = $false; AllowSetup = $false; GraphGrants = 0; ExoTokenFault = ''; ServicePrincipals = 0
+      EvidenceFault = ''; PreflightFault = ''; JobBodies = [Collections.Generic.List[string]]::new(); JobStatus = 'Completed'; JobException = ''; Roles = 0; MetadataFailure = $false; TokenFailure = $false; AllowValidation = $false; AllowGroupCreate = $false; AllowSetup = $false; GraphGrants = 0; ExoTokenFault = ''; ServicePrincipals = 0
     }
     function global:az {
       $f = $global:targetGuard
@@ -94,7 +94,7 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
       throw "Offline tripwire: unexpected azd call $args"
     }
     function global:Invoke-RestMethod {
-      param($Method, $Uri, $Headers, $Body, $ContentType, [switch]$SkipHttpErrorCheck, $StatusCodeVariable)
+      param($Method, $Uri, $Headers, $Body, $ContentType, [switch]$SkipHttpErrorCheck, $StatusCodeVariable, $MaximumRedirection, $TimeoutSec)
       $f = $global:targetGuard
       $f.Headers.Add([string]$Headers.Authorization)
       if ($Method -ne 'GET') {
@@ -108,6 +108,20 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
         throw "Offline mutation tripwire: $Method $Uri"
       }
       $f.Reads.Add([string]$Uri)
+      if ($f.AllowValidation -and $Uri -match '/runbooks/maester-runbook(/content)?\?api-version=2024-10-23$') {
+        if ($MaximumRedirection -ne 0 -or $TimeoutSec -ne 30) { throw 'Unexpected validation preflight transport contract.' }
+        if ($f.PreflightFault -eq 'read') { throw 'PRIVATE_PREFLIGHT_PROVIDER_DETAIL' }
+        if ($Matches[1]) {
+          if ($f.PreflightFault -eq 'source') { return 'param([string]$StorageAccountName) Write-Output "old assessment workflow without runtime-only mode"' }
+          if ($f.PreflightFault -eq 'shape') { return @{} }
+          if ($f.PreflightFault -eq 'disable-after-content') { $f.Metadata.state = 'Disabled' }
+          if ($f.PreflightFault -eq 'normalized') { return ([string][char]0xFEFF + $f.RunbookContent.Replace("`r`n", "`n").Replace("`n", "`r`n")) }
+          return $f.RunbookContent
+        }
+        $id = ($Uri -replace '\?.*$', '') -replace '^https://management.azure.com', ''
+        if ($f.PreflightFault -eq 'wrong-id') { $id += '-other' }
+        return [pscustomobject]@{ id=$id;type='Microsoft.Automation/automationAccounts/runbooks';properties=@{state=$(if($f.PreflightFault -eq 'edit'){'Edit'}else{'Published'});runbookType='PowerShell'} }
+      }
       if ($f.AllowSetup) {
         $path = $Uri -replace '\?.*$', ''
         if ($Uri -like 'https://graph.microsoft.com/*') {
@@ -223,6 +237,32 @@ Describe 'Actual Automation entrypoints enforce fresh canonical target guards' {
     $tokenCalls[0] | Should -Match "--subscription $script:guardSub"
     ($f.Cli -join '|') | Should -Not -Match 'account set|account list|account show|login'
     $f.CachedDefault.id | Should -BeExactly $script:guardOther
+  }
+
+  It 'refuses a legacy payload before job creation for runtime-only=<RuntimeOnly>' -ForEach @(@{RuntimeOnly=$true},@{RuntimeOnly=$false}) {
+    $f = $global:targetGuard; $f.AllowValidation = $true; $f.PreflightFault = 'source'
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly:$RuntimeOnly } | Should -Throw '*publishedContentMismatch*'
+    $f.JobBodies.Count | Should -Be 0
+    $f.Writes.Count | Should -Be 0
+  }
+
+  It 'refuses preflight <Fault> before a validation job' -ForEach @(
+    @{Fault='read';Message='*publishedContentUnavailable*'}, @{Fault='shape';Message='*publishedContentMismatch*'},
+    @{Fault='edit';Message='*publishedRunbookInvalid*'}, @{Fault='wrong-id';Message='*publishedRunbookInvalid*'},
+    @{Fault='disable-after-content';Message='*Enabled*'}
+  ) {
+    $f = $global:targetGuard; $f.AllowValidation = $true; $f.PreflightFault = $Fault
+    { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly } | Should -Throw $Message
+    $f.JobBodies.Count | Should -Be 0
+    $f.Writes.Count | Should -Be 0
+  }
+
+  It 'accepts only BOM/CRLF normalization at the published preflight and retains job-specific verification' {
+    $f = $global:targetGuard; $f.AllowValidation = $true; $f.PreflightFault = 'normalized'
+    $result = Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' -RuntimeValidationOnly
+    $result.ValidationPassed | Should -BeTrue
+    $f.JobBodies.Count | Should -Be 1
+    @($f.Reads | Where-Object {$_ -match '/jobs/[^/]+/runbookContent\?'}).Count | Should -Be 1
   }
 
   It 'serializes the actual job parameter contract for <Mode>' -ForEach @(@{ Mode = 'default' }, @{ Mode = 'enabled' }, @{ Mode = 'explicit false' }) {
@@ -454,7 +494,10 @@ Export-ModuleMember -Function *
     $f = $global:targetGuard; $f.AllowValidation = $true; $f.EvidenceFault = $Fault
     { Invoke-GuardEntrypoint -Name 'Invoke-RunbookValidation.ps1' } | Should -Throw '*validation.*'
     $f.JobBodies.Count | Should -Be 1
-    ($f.Reads -join '|') | Should -Not -Match '/streams|/runbooks/.+/content'
+    $f.Reads[0] | Should -Match '/runbooks/maester-runbook\?api-version=2024-10-23$'
+    $f.Reads[1] | Should -Match '/runbooks/maester-runbook/content\?api-version=2024-10-23$'
+    @($f.Reads | Where-Object { $_ -match '/runbooks/.+/content\?' }).Count | Should -Be 1
+    (($f.Reads | Select-Object -Skip 2) -join '|') | Should -Not -Match '/streams|/runbooks/.+/content'
   }
   It 'propagates explicit no-mail qualification and binds both exact job read endpoints' {
     $f = $global:targetGuard; $f.AllowValidation = $true

@@ -61,6 +61,23 @@ $jobId = [guid]::NewGuid().ToString()
 $basePath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName"
 
 $expectedContent = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-MaesterAutomationRunbook.ps1') -Raw
+$runbookPath = "$basePath/runbooks/$([uri]::EscapeDataString($RunbookName))"
+try {
+  $publishedRunbook = Invoke-RestMethod -Method GET -Uri "https://management.azure.com${runbookPath}?api-version=2024-10-23" -Headers $armHeaders -MaximumRedirection 0 -TimeoutSec 30
+  $publishedContent = Invoke-RestMethod -Method GET -Uri "https://management.azure.com${runbookPath}/content?api-version=2024-10-23" -Headers $armHeaders -MaximumRedirection 0 -TimeoutSec 30
+}
+catch { throw 'validation.publishedContentUnavailable: cannot verify the exact published runbook before starting a job.' }
+if ([string]$publishedRunbook.id -ine "$basePath/runbooks/$RunbookName" -or
+    [string]$publishedRunbook.type -ine 'Microsoft.Automation/automationAccounts/runbooks' -or
+    [string]$publishedRunbook.properties.state -cne 'Published' -or
+    [string]$publishedRunbook.properties.runbookType -cne 'PowerShell') {
+  throw 'validation.publishedRunbookInvalid: expected the exact published PowerShell runbook before starting a job.'
+}
+if ($publishedContent -isnot [string] -or [string]::IsNullOrWhiteSpace($publishedContent) -or
+    (Get-AutomationEvidenceSource -Content $publishedContent) -cne (Get-AutomationEvidenceSource -Content $expectedContent)) {
+  throw 'validation.publishedContentMismatch: publish and verify the reviewed workflow before starting a validation job; runtime-only flags cannot constrain a different payload.'
+}
+$publishedContent = $null
 $jobParameters = @{}
 if (-not $RuntimeValidationOnly) {
   $jobParameters.ValidationJobId = ($jobId | ConvertTo-Json -Compress)
@@ -86,6 +103,7 @@ $jobBody = @{
 } | ConvertTo-Json -Depth 10 -Compress
 
 $startedAt = [datetimeoffset]::UtcNow
+Get-AzCliSubscriptionContext -SubscriptionId $SubscriptionId -TenantId $TenantId | Out-Null
 Invoke-RestMethod -Method PUT -Uri "https://management.azure.com$basePath/jobs/${jobId}?api-version=$apiVersion" -Headers $armHeaders -Body $jobBody -ContentType 'application/json' | Out-Null
 Write-Host "Started runbook job: $jobId"
 
