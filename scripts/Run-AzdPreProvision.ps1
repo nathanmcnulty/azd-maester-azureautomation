@@ -58,6 +58,7 @@ if ([string]::IsNullOrWhiteSpace($SubscriptionId) -or $selectedValues['AZURE_SUB
 }
 if ([string]::IsNullOrWhiteSpace($location)) { $location = [string]$selectedValues['AZURE_LOCATION'] }
 $aaName = "aa-$($EnvironmentName.ToLower())"
+$runtimeEnvironmentName = Resolve-MaesterRuntimeEnvironmentName -EnvironmentValues $selectedValues
 $expectedSolutionTag = Resolve-MaesterPreservationSolutionTag -EnvironmentValues $selectedValues -SubscriptionId $SubscriptionId `
   -ResourceGroupName $rgName -EnvironmentName $EnvironmentName
 $explicitSolutionTag = Resolve-MaesterUpgradeControlValue -EnvironmentValues $selectedValues -Name 'AUTOMATION_ADOPT_SOLUTION_TAG'
@@ -212,6 +213,7 @@ if ($ownership.OwnedJobScheduleId) {
   Write-Host "Verified existing template jobSchedule '$($ownership.OwnedJobScheduleId)'; its linkage and resource lock remain intact."
 }
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_JOB_SCHEDULE_ID' -Value $ownership.JobScheduleId
+Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_RUNTIME_ENVIRONMENT_NAME' -Value $runtimeEnvironmentName
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_EXISTING_RESOURCES' -Value $verifiedResources.Existing.ToString().ToLowerInvariant()
 Set-MaesterAzdEnvValue -EnvironmentName $EnvironmentName -Name 'AUTOMATION_UPGRADE_PRESERVE_ACCESS' -Value $preserveUpgradeAccess.ToString().ToLowerInvariant()
 # Runtime-only upgrades never create an Automation account or consume account quota.

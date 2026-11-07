@@ -1,4 +1,20 @@
 #Requires -Version 7.6
+function Resolve-MaesterRuntimeEnvironmentName {
+  param([Parameter(Mandatory)][System.Collections.IDictionary]$EnvironmentValues)
+  $key = 'AUTOMATION_RUNTIME_ENVIRONMENT_NAME'
+  $selected = if ($EnvironmentValues.Contains($key)) { $EnvironmentValues[$key] } else { $null }
+  $process = [Environment]::GetEnvironmentVariable($key)
+  if ($null -ne $selected -and $selected -isnot [string]) { throw "$key must be a string." }
+  if ($null -ne $process -and -not $EnvironmentValues.Contains($key)) { throw "$key must be set in the selected azd environment; process-only targets are not accepted." }
+  if ($EnvironmentValues.Contains($key) -and $null -ne $process -and [string]$selected -cne $process) {
+    throw "The process $key differs from the selected azd environment."
+  }
+  $value = [string]$selected
+  if ($value -ceq '') { return 'PowerShell-76-Maester' }
+  if ($value -cnotmatch '^[a-zA-Z][a-zA-Z0-9_-]*\z') { throw "$key must start with a letter and contain only letters, digits, underscores or hyphens." }
+  return $value
+}
+
 function Resolve-MaesterUpgradeControlValue {
   [CmdletBinding()]
   param(

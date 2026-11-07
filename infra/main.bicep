@@ -12,6 +12,10 @@ param location string = resourceGroup().location
 @description('Environment name from azd')
 param environmentName string = 'dev'
 
+@description('Explicit runtime target. Use a distinct reviewed name to retain an existing runtime and its packages for rollback.')
+@minLength(1)
+param automationRuntimeEnvironmentName string = 'PowerShell-76-Maester'
+
 @description('Optional user-assigned managed identity resource id')
 param userAssignedIdentityResourceId string = ''
 
@@ -98,7 +102,7 @@ var preserveUpgradeAccess = preserveUpgradeAccessOption == 'true'
 var automationAccountName = 'aa-${toLower(environmentName)}'
 var scheduleName = 'maester-weekly-sunday'
 var runbookName = 'maester-runbook'
-var runtimeEnvironmentName = 'PowerShell-76-Maester'
+var runtimeEnvironmentName = automationRuntimeEnvironmentName
 var resourceSuffix = toLower(uniqueString(resourceGroup().id, environmentName))
 var storageAccountName = 'stmaester${resourceSuffix}'
 var storageBlobDataContributorRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
